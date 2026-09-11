@@ -54,6 +54,21 @@ export interface DriveStatus {
   lastChecked?: string;
 }
 
+export interface UserProfile {
+  id: string;
+  name: string;
+  email: string;
+  avatar?: string;
+  token?: string;
+}
+
+export interface AuthConfig {
+  googleClientId?: string;
+  whitelistActive: boolean;
+  userEmail?: string;
+  isAllowed?: boolean;
+}
+
 export interface AnalysisResult {
   verdict: string;
   status: ComplianceStatus;

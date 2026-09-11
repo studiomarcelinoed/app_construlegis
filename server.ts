@@ -25,6 +25,79 @@ const ai = apiKey
     })
   : null;
 
+// VIP Whitelist config: ALLOWED_EMAILS (comma-separated list of emails)
+function getAllowedEmails(): string[] {
+  const raw = process.env.ALLOWED_EMAILS || "";
+  return raw
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => Boolean(e));
+}
+
+// Helper to extract email from authorization header or request body
+function extractUserEmail(req: express.Request): string {
+  // 1. From Authorization Bearer (token or email string)
+  const authHeader = req.headers.authorization || "";
+  if (authHeader.startsWith("Bearer ")) {
+    const token = authHeader.slice(7).trim();
+    if (token.includes("@")) {
+      return token.toLowerCase();
+    }
+    // Try to decode JWT payload if it's a Google ID Token
+    try {
+      const parts = token.split(".");
+      if (parts.length === 3) {
+        const payloadJson = Buffer.from(parts[1], "base64").toString("utf-8");
+        const payload = JSON.parse(payloadJson);
+        if (payload.email) {
+          return String(payload.email).toLowerCase();
+        }
+      }
+    } catch {
+      // ignore jwt decode error
+    }
+  }
+
+  // 2. From X-User-Email header
+  const customHeader = req.headers["x-user-email"];
+  if (typeof customHeader === "string" && customHeader.includes("@")) {
+    return customHeader.trim().toLowerCase();
+  }
+
+  // 3. From request body
+  if (req.body?.userEmail && typeof req.body.userEmail === "string") {
+    return req.body.userEmail.trim().toLowerCase();
+  }
+
+  return "";
+}
+
+// Middleware: Controle de Acesso Restrito (Lista VIP / Whitelist de E-mails)
+function checkVipAccess(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const allowed = getAllowedEmails();
+  const userEmail = extractUserEmail(req);
+
+  // Se a whitelist estiver definida e vazia, ou o usuário não tiver e-mail fornecido
+  if (!userEmail) {
+    return res.status(401).json({
+      error: "Autenticação obrigatória. Por favor, faça login com sua conta do Google.",
+      code: "AUTH_REQUIRED",
+    });
+  }
+
+  // Se houver lista de e-mails configurada, valida a presença
+  if (allowed.length > 0 && !allowed.includes(userEmail)) {
+    return res.status(403).json({
+      error: "Sua conta não possui uma licença ativa. Entre em contato para liberar seu acesso.",
+      code: "VIP_REQUIRED",
+      userEmail,
+    });
+  }
+
+  // Se ALLOWED_EMAILS não foi configurado no .env, permite o acesso autenticado por padrão
+  next();
+}
+
 // Helper to extract clean Folder ID from a raw ID or full Google Drive URL
 function extractDriveFolderId(input?: string): string {
   if (!input) return "";
@@ -252,8 +325,8 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Google Drive status & file list endpoint
-app.get("/api/drive/status", async (req, res) => {
+// Google Drive status & file list endpoint (Protegido por checkVipAccess)
+app.get("/api/drive/status", checkVipAccess, async (req, res) => {
   try {
     const requestedFolder = (req.query.folderId as string) || process.env.GOOGLE_DRIVE_FOLDER_ID || "";
     const folderId = extractDriveFolderId(requestedFolder);
@@ -470,9 +543,54 @@ ${prompt || "Por favor, realize a análise técnica e jurídica com base nas nor
   }
 };
 
-// Route handlers for consultation
-app.post("/api/consult", handleConsultation);
-app.post("/api/chat", handleConsultation);
+// Route handlers for consultation (Protegidos por checkVipAccess)
+app.post("/api/consult", checkVipAccess, handleConsultation);
+app.post("/api/chat", checkVipAccess, handleConsultation);
+
+// Endpoint de verificação de autenticação e configuração pública para o frontend
+app.get("/api/auth/config", (req, res) => {
+  const allowed = getAllowedEmails();
+  const userEmail = extractUserEmail(req);
+  const isAllowed = Boolean(userEmail && (allowed.length === 0 || allowed.includes(userEmail)));
+
+  res.json({
+    googleClientId: process.env.GOOGLE_CLIENT_ID || "",
+    whitelistActive: allowed.length > 0,
+    userEmail: userEmail || undefined,
+    isAllowed: userEmail ? isAllowed : false,
+  });
+});
+
+// Endpoint de validação de sessão/licença do usuário
+app.post("/api/auth/verify", (req, res) => {
+  const userEmail = extractUserEmail(req);
+  if (!userEmail) {
+    return res.status(401).json({
+      authenticated: false,
+      isAllowed: false,
+      error: "Nenhum e-mail de usuário identificado na requisição.",
+    });
+  }
+
+  const allowed = getAllowedEmails();
+  const isAllowed = allowed.length === 0 || allowed.includes(userEmail);
+
+  if (!isAllowed) {
+    return res.status(403).json({
+      authenticated: true,
+      isAllowed: false,
+      userEmail,
+      error: "Sua conta não possui uma licença ativa. Entre em contato para liberar seu acesso.",
+    });
+  }
+
+  return res.json({
+    authenticated: true,
+    isAllowed: true,
+    userEmail,
+    message: "Acesso autorizado ao repositório jurídico.",
+  });
+});
 
 
 // Vite middleware & static serving

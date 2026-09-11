@@ -11,9 +11,11 @@ import {
   AlertCircle,
   HelpCircle,
   MessageSquare,
-  FolderSync
+  FolderSync,
+  Lock,
+  MessageCircle
 } from 'lucide-react';
-import { LawDocument, ChatMessage, AnalysisResult, DriveStatus } from './types';
+import { LawDocument, ChatMessage, AnalysisResult, DriveStatus, UserProfile, AuthConfig } from './types';
 import { getInitialDocuments, saveCustomDocuments } from './utils/documentStore';
 import { Header } from './components/Header';
 import { MessageItem } from './components/MessageItem';
@@ -23,6 +25,7 @@ import { DocumentModal } from './components/DocumentModal';
 import { NewDocumentModal } from './components/NewDocumentModal';
 import { DocumentViewerModal } from './components/DocumentViewerModal';
 import { GoogleDriveModal } from './components/GoogleDriveModal';
+import { AuthModal } from './components/AuthModal';
 
 const INITIAL_WELCOME_MESSAGE: ChatMessage = {
   id: 'msg-welcome',
@@ -73,6 +76,23 @@ export default function App() {
   const [isDriveLoading, setIsDriveLoading] = useState(false);
   const [isDriveModalOpen, setIsDriveModalOpen] = useState(false);
 
+  // Authentication & VIP Whitelist state
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
+    const saved = localStorage.getItem('civil_lex_user');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  });
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  const [isAccessDenied, setIsAccessDenied] = useState<boolean>(false);
+  const [deniedEmail, setDeniedEmail] = useState<string>('');
+
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([INITIAL_WELCOME_MESSAGE]);
   const [isLoading, setIsLoading] = useState(false);
@@ -84,16 +104,64 @@ export default function App() {
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Check Drive status on mount
+  // Fetch Auth configuration
   useEffect(() => {
-    fetchDriveStatus(driveFolderId);
-  }, []);
+    fetchAuthConfig();
+  }, [currentUser]);
+
+  const fetchAuthConfig = async () => {
+    try {
+      const headers: Record<string, string> = {};
+      if (currentUser?.email) {
+        headers['Authorization'] = `Bearer ${currentUser.token || currentUser.email}`;
+        headers['X-User-Email'] = currentUser.email;
+      }
+      const res = await fetch('/api/auth/config', { headers });
+      if (res.ok) {
+        const config: AuthConfig = await res.json();
+        setAuthConfig(config);
+      }
+    } catch (e) {
+      console.warn('Erro ao carregar auth config:', e);
+    }
+  };
+
+  const getAuthHeaders = () => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (currentUser?.email) {
+      headers['Authorization'] = `Bearer ${currentUser.token || currentUser.email}`;
+      headers['X-User-Email'] = currentUser.email;
+    }
+    return headers;
+  };
+
+  // Check Drive status on mount or user change
+  useEffect(() => {
+    if (currentUser) {
+      fetchDriveStatus(driveFolderId);
+    } else {
+      setIsAuthModalOpen(true);
+    }
+  }, [currentUser]);
 
   const fetchDriveStatus = async (folderToQuery?: string) => {
+    if (!currentUser) return;
     setIsDriveLoading(true);
     try {
       const q = folderToQuery !== undefined ? folderToQuery : driveFolderId;
-      const res = await fetch(`/api/drive/status?folderId=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/drive/status?folderId=${encodeURIComponent(q)}`, {
+        headers: getAuthHeaders(),
+      });
+
+      if (res.status === 403) {
+        setIsAccessDenied(true);
+        setDeniedEmail(currentUser?.email || '');
+        setIsAuthModalOpen(true);
+        return;
+      }
+
       if (res.ok) {
         const data: DriveStatus = await res.json();
         setDriveStatus(data);
@@ -113,6 +181,23 @@ export default function App() {
     setDriveFolderId(newFolder);
     localStorage.setItem('civil_lex_drive_folder', newFolder);
     await fetchDriveStatus(newFolder);
+  };
+
+  const handleLoginSuccess = (user: UserProfile) => {
+    setCurrentUser(user);
+    localStorage.setItem('civil_lex_user', JSON.stringify(user));
+    setIsAuthModalOpen(false);
+    setIsAccessDenied(false);
+    setDeniedEmail('');
+    fetchDriveStatus(driveFolderId);
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    localStorage.removeItem('civil_lex_user');
+    setIsAccessDenied(false);
+    setDeniedEmail('');
+    setIsAuthModalOpen(true);
   };
 
   // Save documents whenever they change
@@ -162,6 +247,12 @@ export default function App() {
   ) => {
     if (isLoading) return;
 
+    // Force login if not authenticated
+    if (!currentUser) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
     // Create user message
     const userMsg: ChatMessage = {
       id: `msg-user-${Date.now()}`,
@@ -199,16 +290,28 @@ export default function App() {
 
       const res = await fetch('/api/consult', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           prompt: text,
           image: imagePayload,
           driveFolderId: driveFolderId || undefined,
           customDocuments: activeDocs,
+          userEmail: currentUser.email,
         }),
       });
+
+      if (res.status === 401) {
+        setIsAuthModalOpen(true);
+        throw new Error('Autenticação obrigatória. Por favor, faça login com sua conta do Google.');
+      }
+
+      if (res.status === 403) {
+        setIsAccessDenied(true);
+        setDeniedEmail(currentUser.email);
+        setIsAuthModalOpen(true);
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Sua conta não possui uma licença ativa. Entre em contato para liberar seu acesso.');
+      }
 
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
@@ -231,7 +334,7 @@ export default function App() {
       const errorMsg: ChatMessage = {
         id: `msg-err-${Date.now()}`,
         sender: 'assistant',
-        text: 'Não foi possível processar a consulta neste momento.',
+        text: 'Não foi possível processar a consulta.',
         timestamp: new Date().toISOString(),
         error: err.message || 'Ocorreu um erro de comunicação com o servidor.',
       };
@@ -253,13 +356,39 @@ export default function App() {
       <Header
         documents={documents}
         driveStatus={driveStatus}
+        currentUser={currentUser}
         onOpenDocManager={() => setIsDocManagerOpen(true)}
         onOpenNewDocModal={() => setIsNewDocModalOpen(true)}
         onOpenDriveSettings={() => setIsDriveModalOpen(true)}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onLogout={handleLogout}
       />
 
       {/* Main Layout Area */}
       <main className="flex-1 flex flex-col max-w-4xl w-full mx-auto px-4 sm:px-6 pt-6 pb-2">
+        {/* Banner de Licença Bloqueada / Whitelist 403 */}
+        {isAccessDenied && currentUser && (
+          <div className="mb-4 p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-center gap-2">
+              <Lock className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>
+                A conta <strong>{currentUser.email}</strong> não possui licença ativa no servidor.
+              </span>
+            </div>
+            <a
+              href={`https://wa.me/?text=${encodeURIComponent(
+                `Olá! Gostaria de solicitar a liberação de licença para ${currentUser.email} na plataforma de Legislação da Construção Civil.`
+              )}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-500 shrink-0 cursor-pointer shadow-xs"
+            >
+              <MessageCircle className="w-3.5 h-3.5" />
+              <span>Liberar Licença</span>
+            </a>
+          </div>
+        )}
+
         {/* Chat Header Actions */}
         <div className="flex items-center justify-between pb-4 border-b border-slate-200/80 mb-4">
           <div className="flex items-center gap-2 text-xs font-semibold text-slate-600">
@@ -374,6 +503,20 @@ export default function App() {
       <DocumentViewerModal
         document={viewingDocument}
         onClose={() => setViewingDocument(null)}
+      />
+
+      {/* Modal: Authentication & VIP Whitelist License Check */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        authConfig={authConfig}
+        onLoginSuccess={handleLoginSuccess}
+        isAccessDenied={isAccessDenied}
+        deniedEmail={deniedEmail}
+        onClose={() => {
+          if (currentUser && !isAccessDenied) {
+            setIsAuthModalOpen(false);
+          }
+        }}
       />
     </div>
   );
