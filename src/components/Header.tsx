@@ -1,15 +1,17 @@
 import React from 'react';
-import { Scale, BookOpen, ShieldCheck, Plus, FolderSync, UserCheck, LogOut, Lock } from 'lucide-react';
+import { Scale, BookOpen, ShieldCheck, Plus, FolderSync, UserCheck, LogOut, Lock, ShieldAlert } from 'lucide-react';
 import { LawDocument, DriveStatus, UserProfile } from '../types';
 
 interface HeaderProps {
   documents: LawDocument[];
   driveStatus: DriveStatus | null;
   currentUser: UserProfile | null;
+  isMasterAdmin: boolean;
   onOpenDocManager: () => void;
   onOpenNewDocModal: () => void;
   onOpenDriveSettings: () => void;
   onOpenAuthModal: () => void;
+  onOpenAdminModal: () => void;
   onLogout: () => void;
 }
 
@@ -17,10 +19,12 @@ export const Header: React.FC<HeaderProps> = ({
   documents,
   driveStatus,
   currentUser,
+  isMasterAdmin,
   onOpenDocManager,
   onOpenNewDocModal,
   onOpenDriveSettings,
   onOpenAuthModal,
+  onOpenAdminModal,
   onLogout,
 }) => {
   const activeCount = documents.filter((d) => d.active).length;
@@ -98,6 +102,19 @@ export const Header: React.FC<HeaderProps> = ({
             <Plus className="w-4 h-4" />
             <span className="hidden sm:inline">Subir Lei</span>
           </button>
+
+          {/* Master Admin Button - Visível apenas para o Master Admin */}
+          {isMasterAdmin && (
+            <button
+              id="btn-open-admin-panel"
+              onClick={onOpenAdminModal}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-amber-950 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 active:scale-[0.98] shadow-xs transition-all cursor-pointer border border-amber-600/30"
+              title="Painel de Administração Mestre (Whitelist e Diretrizes)"
+            >
+              <ShieldAlert className="w-4 h-4 text-amber-950" />
+              <span>Painel ADM</span>
+            </button>
+          )}
 
           {/* User Account / VIP Profile */}
           {currentUser ? (

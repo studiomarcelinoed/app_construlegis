@@ -26,6 +26,7 @@ import { NewDocumentModal } from './components/NewDocumentModal';
 import { DocumentViewerModal } from './components/DocumentViewerModal';
 import { GoogleDriveModal } from './components/GoogleDriveModal';
 import { AuthModal } from './components/AuthModal';
+import { AdminModal } from './components/AdminModal';
 
 const INITIAL_WELCOME_MESSAGE: ChatMessage = {
   id: 'msg-welcome',
@@ -100,7 +101,12 @@ export default function App() {
   // Modals state
   const [isDocManagerOpen, setIsDocManagerOpen] = useState(false);
   const [isNewDocModalOpen, setIsNewDocModalOpen] = useState(false);
+  const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
   const [viewingDocument, setViewingDocument] = useState<LawDocument | null>(null);
+
+  const isMasterAdmin = Boolean(
+    currentUser?.email && currentUser.email.toLowerCase() === 'studio@fabianomarcelino.com'
+  );
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -358,10 +364,12 @@ export default function App() {
         documents={documents}
         driveStatus={driveStatus}
         currentUser={currentUser}
+        isMasterAdmin={isMasterAdmin}
         onOpenDocManager={() => setIsDocManagerOpen(true)}
         onOpenNewDocModal={() => setIsNewDocModalOpen(true)}
         onOpenDriveSettings={() => setIsDriveModalOpen(true)}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onOpenAdminModal={() => setIsAdminModalOpen(true)}
         onLogout={handleLogout}
       />
 
@@ -519,6 +527,21 @@ export default function App() {
           }
         }}
       />
+
+      {/* Modal: Painel do Administrador Mestre */}
+      {isMasterAdmin && (
+        <AdminModal
+          isOpen={isAdminModalOpen}
+          onClose={() => setIsAdminModalOpen(false)}
+          getAuthHeaders={getAuthHeaders}
+          driveStatus={driveStatus}
+          onRefreshDrive={() => fetchDriveStatus(undefined, true)}
+          onOpenDriveSettings={() => {
+            setIsAdminModalOpen(false);
+            setIsDriveModalOpen(true);
+          }}
+        />
+      )}
     </div>
   );
 }

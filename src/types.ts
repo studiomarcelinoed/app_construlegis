@@ -67,6 +67,31 @@ export interface AuthConfig {
   whitelistActive: boolean;
   userEmail?: string;
   isAllowed?: boolean;
+  isAdmin?: boolean;
+  masterAdminEmail?: string;
+}
+
+export interface WhitelistUser {
+  id: string;
+  email: string;
+  name: string;
+  company?: string;
+  active: boolean;
+  createdAt: string;
+  lastAccess?: string;
+  isMaster?: boolean;
+}
+
+export interface SystemDirective {
+  id: string;
+  title: string;
+  code: string;
+  category: 'diretriz_geral' | 'norma_tecnica' | 'legislacao' | 'prompt_comportamento';
+  description: string;
+  content: string;
+  active: boolean;
+  isBuiltIn?: boolean;
+  updatedAt?: string;
 }
 
 export interface AnalysisResult {

@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
@@ -25,13 +26,231 @@ const ai = apiKey
     })
   : null;
 
-// VIP Whitelist config: ALLOWED_EMAILS (comma-separated list of emails)
-function getAllowedEmails(): string[] {
-  const raw = process.env.ALLOWED_EMAILS || "";
-  return raw
+// Administrador Mestre Permanente
+export const MASTER_ADMIN_EMAIL = "studio@fabianomarcelino.com";
+
+// Arquivos locais para persistência de dados administrativos
+const DATA_DIR = path.join(process.cwd(), "data");
+const USERS_FILE = path.join(DATA_DIR, "allowed_users.json");
+const DIRECTIVES_FILE = path.join(DATA_DIR, "system_directives.json");
+
+if (!fs.existsSync(DATA_DIR)) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch (e) {
+    console.error("Erro ao criar pasta data:", e);
+  }
+}
+
+export interface StoredUser {
+  id: string;
+  email: string;
+  name: string;
+  company?: string;
+  active: boolean;
+  createdAt: string;
+  lastAccess?: string;
+  isMaster?: boolean;
+}
+
+export interface StoredDirective {
+  id: string;
+  title: string;
+  code: string;
+  category: 'diretriz_geral' | 'norma_tecnica' | 'legislacao' | 'prompt_comportamento';
+  description: string;
+  content: string;
+  active: boolean;
+  isBuiltIn?: boolean;
+  updatedAt?: string;
+}
+
+// Inicialização de Usuários com Whitelist Inicial + Administrador Mestre
+function getInitialUsers(): StoredUser[] {
+  const users: StoredUser[] = [
+    {
+      id: "usr-master-01",
+      email: MASTER_ADMIN_EMAIL,
+      name: "Fabiano Marcelino (Administrador)",
+      company: "Estúdio Marcelino",
+      active: true,
+      createdAt: new Date().toISOString(),
+      isMaster: true,
+    },
+  ];
+
+  // Adiciona e-mails vindos da variável de ambiente ALLOWED_EMAILS se existirem
+  const envEmails = (process.env.ALLOWED_EMAILS || "")
     .split(",")
     .map((e) => e.trim().toLowerCase())
-    .filter((e) => Boolean(e));
+    .filter((e) => Boolean(e) && e !== MASTER_ADMIN_EMAIL);
+
+  for (const email of envEmails) {
+    if (!users.some((u) => u.email.toLowerCase() === email)) {
+      users.push({
+        id: `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        email,
+        name: email.split("@")[0],
+        company: "Licença Autorizada",
+        active: true,
+        createdAt: new Date().toISOString(),
+        isMaster: false,
+      });
+    }
+  }
+
+  return users;
+}
+
+// Inicialização de Diretrizes Padrão do Sistema
+function getInitialDirectives(): StoredDirective[] {
+  return [
+    {
+      id: "dir-01",
+      title: "Veredito Técnico e Implicações Práticas",
+      code: "SISTEMA-DIR-01",
+      category: "prompt_comportamento",
+      description: "Determina que toda resposta deve abrir com um veredito claro e passos práticos acionáveis para canteiro de obras.",
+      content: "Priorize sempre a clareza prática. Aponte se a situação está Conforme, Não Conforme ou sob Atenção. Detalhe o passo a passo de como o engenheiro ou mestre deve agir no canteiro.",
+      active: true,
+      isBuiltIn: true,
+      updatedAt: new Date().toISOString(),
+    },
+    {
+      id: "dir-02",
+      title: "Citações Literais e Conexão com Google Drive",
+      code: "SISTEMA-DIR-02",
+      category: "diretriz_geral",
+      description: "Obrigatoriedade de extrair trechos literais dos documentos do Google Drive e citar fontes reais.",
+      content: "Para qualquer afirmação técnica, mencione o artigo, item e trecho literal exato presente nas normas da pasta do Google Drive ou da legislação brasileira. Crie links diretos para os arquivos do Drive nos campos de citação.",
+      active: true,
+      isBuiltIn: true,
+      updatedAt: new Date().toISOString(),
+    },
+    {
+      id: "dir-03",
+      title: "Análise de Riscos Jurídicos, Multas e Habite-se",
+      code: "SISTEMA-DIR-03",
+      category: "legislacao",
+      description: "Alerta sobre embargos, penalidades de prefeituras, ações judiciais de vizinhos e responsabilidade técnica civil/criminal.",
+      content: "Identifique expressamente o risco de embargo de obra, multas fiscais municipais, reprovação de Habite-se, ação de vizinho no prazo decadencial de ano e dia (Art. 1.302 CC) e necessidade de emissão/retificação de ART/RRT.",
+      active: true,
+      isBuiltIn: true,
+      updatedAt: new Date().toISOString(),
+    },
+    {
+      id: "dir-04",
+      title: "Acessibilidade ABNT NBR 9050:2020",
+      code: "NBR 9050:2020",
+      category: "norma_tecnica",
+      description: "Parâmetros para rampas (máx 8,33%), vãos de portas (mín 0,80m), escadas (Blondel) e sanitários acessíveis (giro 1,50m).",
+      content: "Rampas em novas construções: inclinação máxima de 8,33% com desnível máx 0,80m por lance. Portas em rotas acessíveis: vão livre útil mín 0,80m. Escadas: 63cm <= 2E + P <= 65cm. Sanitários acessíveis: área de manobra com diâmetro mín de 1,50m e barras a 0,75m.",
+      active: true,
+      isBuiltIn: true,
+      updatedAt: new Date().toISOString(),
+    },
+    {
+      id: "dir-05",
+      title: "Direito de Construir e Vizinhança (Código Civil)",
+      code: "Arts. 1.299 a 1.313 CC",
+      category: "legislacao",
+      description: "Distância mínima de 1,50m para janelas e terraços em relação à divisa; 0,75m para visões perpendiculares.",
+      content: "Art. 1.301: É defeso abrir janelas ou fazer eirado, terraço ou varanda a menos de metro e meio (1,50m) do terreno vizinho. Janelas perpendiculares/oblíquas: mínimo de 75 cm. Prazo de ano e dia para impugnação e desfazimento (Art. 1.302).",
+      active: true,
+      isBuiltIn: true,
+      updatedAt: new Date().toISOString(),
+    },
+  ];
+}
+
+// Leitura e gravação no disco
+export function loadStoredUsers(): StoredUser[] {
+  try {
+    if (fs.existsSync(USERS_FILE)) {
+      const data = fs.readFileSync(USERS_FILE, "utf-8");
+      const list: StoredUser[] = JSON.parse(data);
+      // Garante que o MASTER ADMIN sempre exista e esteja ativo
+      const hasMaster = list.some((u) => u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase());
+      if (!hasMaster) {
+        list.unshift({
+          id: "usr-master-01",
+          email: MASTER_ADMIN_EMAIL,
+          name: "Fabiano Marcelino (Administrador)",
+          company: "Estúdio Marcelino",
+          active: true,
+          createdAt: new Date().toISOString(),
+          isMaster: true,
+        });
+        saveStoredUsers(list);
+      }
+      return list;
+    }
+  } catch (e) {
+    console.error("Erro ao ler users.json:", e);
+  }
+  const defaults = getInitialUsers();
+  saveStoredUsers(defaults);
+  return defaults;
+}
+
+export function saveStoredUsers(users: StoredUser[]): void {
+  try {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Erro ao salvar users.json:", e);
+  }
+}
+
+export function loadStoredDirectives(): StoredDirective[] {
+  try {
+    if (fs.existsSync(DIRECTIVES_FILE)) {
+      const data = fs.readFileSync(DIRECTIVES_FILE, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (e) {
+    console.error("Erro ao ler directives.json:", e);
+  }
+  const defaults = getInitialDirectives();
+  saveStoredDirectives(defaults);
+  return defaults;
+}
+
+export function saveStoredDirectives(directives: StoredDirective[]): void {
+  try {
+    fs.writeFileSync(DIRECTIVES_FILE, JSON.stringify(directives, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Erro ao salvar directives.json:", e);
+  }
+}
+
+// Verifica se um e-mail possui autorização ativa
+export function isEmailAuthorized(rawEmail: string): boolean {
+  if (!rawEmail) return false;
+  const email = rawEmail.trim().toLowerCase();
+
+  // 1. O Administrador Mestre é permanentemente autorizado
+  if (email === MASTER_ADMIN_EMAIL.toLowerCase()) {
+    return true;
+  }
+
+  // 2. Consulta a lista de usuários ativos no banco local
+  const users = loadStoredUsers();
+  const user = users.find((u) => u.email.toLowerCase() === email);
+  if (user) {
+    return user.active;
+  }
+
+  // 3. Fallback para ALLOWED_EMAILS se configurado no .env
+  const envEmails = (process.env.ALLOWED_EMAILS || "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (envEmails.includes(email)) {
+    return true;
+  }
+
+  return false;
 }
 
 // Helper to extract email from authorization header or request body
@@ -72,12 +291,11 @@ function extractUserEmail(req: express.Request): string {
   return "";
 }
 
-// Middleware: Controle de Acesso Restrito (Lista VIP / Whitelist de E-mails)
+// Middleware: Controle de Acesso Restrito Estrito (Whitelist de E-mails com Suporte ao Master Admin)
 function checkVipAccess(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const allowed = getAllowedEmails();
   const userEmail = extractUserEmail(req);
 
-  // Se a whitelist estiver definida e vazia, ou o usuário não tiver e-mail fornecido
+  // Sem e-mail fornecido
   if (!userEmail) {
     return res.status(401).json({
       error: "Autenticação obrigatória. Por favor, faça login com sua conta do Google.",
@@ -85,16 +303,43 @@ function checkVipAccess(req: express.Request, res: express.Response, next: expre
     });
   }
 
-  // Se houver lista de e-mails configurada, valida a presença
-  if (allowed.length > 0 && !allowed.includes(userEmail)) {
+  // O e-mail studio@fabianomarcelino.com é mestre permanente
+  if (userEmail === MASTER_ADMIN_EMAIL.toLowerCase()) {
+    return next();
+  }
+
+  // Validação estrita contra a lista de autorizados
+  if (!isEmailAuthorized(userEmail)) {
+    console.warn(`[Segurança] Acesso negado para o e-mail: ${userEmail} (403 Forbidden)`);
     return res.status(403).json({
-      error: "Sua conta não possui uma licença ativa. Entre em contato para liberar seu acesso.",
+      error: "Acesso não autorizado. Entre em contato com o administrador para solicitar uma licença.",
       code: "VIP_REQUIRED",
       userEmail,
     });
   }
 
-  // Se ALLOWED_EMAILS não foi configurado no .env, permite o acesso autenticado por padrão
+  // Atualiza último acesso
+  try {
+    const users = loadStoredUsers();
+    const u = users.find((x) => x.email.toLowerCase() === userEmail);
+    if (u) {
+      u.lastAccess = new Date().toISOString();
+      saveStoredUsers(users);
+    }
+  } catch {}
+
+  next();
+}
+
+// Middleware: Exclusivo para o Administrador Mestre
+function checkMasterAdminAccess(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const userEmail = extractUserEmail(req);
+  if (!userEmail || userEmail !== MASTER_ADMIN_EMAIL.toLowerCase()) {
+    return res.status(403).json({
+      error: "Acesso restrito exclusivo para o Administrador Mestre do sistema.",
+      code: "ADMIN_FORBIDDEN",
+    });
+  }
   next();
 }
 
@@ -457,7 +702,17 @@ const handleConsultation = async (req: express.Request, res: express.Response) =
       driveContext = `PASTA COMPARTILHADA DO GOOGLE DRIVE (${arquivosDrive.length} documentos disponíveis):\n${listaFormatada}\n`;
     }
 
-    // 2. Documentos adicionais em memória (se houver)
+    // 2. Diretrizes e instruções ativas configuradas pelo Administrador
+    const diretrizes = loadStoredDirectives().filter((d) => d.active);
+    let directivesContext = "";
+    if (diretrizes.length > 0) {
+      directivesContext = `DIRETRIZES TÉCNICAS E DE COMPORTAMENTO DO SISTEMA (CONFIGURADAS PELO ADMINISTRADOR):\n` +
+        diretrizes
+          .map((d) => `[${d.code} - ${d.title} (${d.category})]\n${d.content}`)
+          .join("\n\n") + "\n";
+    }
+
+    // 3. Documentos adicionais em memória (se houver)
     let memoryContext = "";
     if (Array.isArray(customDocuments) && customDocuments.length > 0) {
       memoryContext = customDocuments
@@ -526,8 +781,11 @@ Retorne ESTRITAMENTE em formato JSON com o seguinte schema:
       });
     }
 
-    // Build consolidated prompt with Drive and norms context
+    // Build consolidated prompt with Drive, Admin Directives and norms context
     let promptContext = "";
+    if (directivesContext) {
+      promptContext += `${directivesContext}\n`;
+    }
     if (driveContext) {
       promptContext += `${driveContext}\n`;
     }
@@ -612,15 +870,17 @@ app.post("/api/chat", checkVipAccess, handleConsultation);
 
 // Endpoint de verificação de autenticação e configuração pública para o frontend
 app.get("/api/auth/config", (req, res) => {
-  const allowed = getAllowedEmails();
   const userEmail = extractUserEmail(req);
-  const isAllowed = Boolean(userEmail && (allowed.length === 0 || allowed.includes(userEmail)));
+  const isAllowed = userEmail ? isEmailAuthorized(userEmail) : false;
+  const isMasterAdmin = userEmail ? userEmail === MASTER_ADMIN_EMAIL.toLowerCase() : false;
 
   res.json({
     googleClientId: process.env.GOOGLE_CLIENT_ID || "",
-    whitelistActive: allowed.length > 0,
+    whitelistActive: true,
     userEmail: userEmail || undefined,
-    isAllowed: userEmail ? isAllowed : false,
+    isAllowed,
+    isMasterAdmin,
+    masterAdminEmail: MASTER_ADMIN_EMAIL,
   });
 });
 
@@ -635,24 +895,195 @@ app.post("/api/auth/verify", (req, res) => {
     });
   }
 
-  const allowed = getAllowedEmails();
-  const isAllowed = allowed.length === 0 || allowed.includes(userEmail);
+  const isAllowed = isEmailAuthorized(userEmail);
+  const isMasterAdmin = userEmail === MASTER_ADMIN_EMAIL.toLowerCase();
 
   if (!isAllowed) {
     return res.status(403).json({
       authenticated: true,
       isAllowed: false,
+      isMasterAdmin: false,
       userEmail,
-      error: "Sua conta não possui uma licença ativa. Entre em contato para liberar seu acesso.",
+      error: "Acesso não autorizado. Entre em contato com o administrador para solicitar uma licença.",
     });
   }
 
   return res.json({
     authenticated: true,
     isAllowed: true,
+    isMasterAdmin,
     userEmail,
-    message: "Acesso autorizado ao repositório jurídico.",
+    message: isMasterAdmin
+      ? "Sessão iniciada como Administrador Mestre permanente."
+      : "Acesso autorizado ao repositório jurídico.",
   });
+});
+
+// ==========================================
+// PAINEL DO ADMINISTRADOR (ROTAS EXCLUSIVAS)
+// ==========================================
+
+// 1. Gestão de Usuários da Whitelist
+app.get("/api/admin/users", checkMasterAdminAccess, (req, res) => {
+  const users = loadStoredUsers();
+  res.json({
+    success: true,
+    users,
+    total: users.length,
+    activeCount: users.filter((u) => u.active).length,
+  });
+});
+
+app.post("/api/admin/users", checkMasterAdminAccess, (req, res) => {
+  const { email, name, company } = req.body;
+  if (!email || typeof email !== "string" || !email.includes("@")) {
+    return res.status(400).json({ error: "E-mail válido é obrigatório." });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+  const users = loadStoredUsers();
+
+  if (users.some((u) => u.email.toLowerCase() === cleanEmail)) {
+    return res.status(400).json({ error: "Este e-mail já está cadastrado na whitelist." });
+  }
+
+  const newUser: StoredUser = {
+    id: `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    email: cleanEmail,
+    name: (name && String(name).trim()) || cleanEmail.split("@")[0],
+    company: (company && String(company).trim()) || "Geral",
+    active: true,
+    createdAt: new Date().toISOString(),
+    isMaster: cleanEmail === MASTER_ADMIN_EMAIL.toLowerCase(),
+  };
+
+  users.push(newUser);
+  saveStoredUsers(users);
+
+  res.status(201).json({
+    success: true,
+    user: newUser,
+    message: "Usuário adicionado com sucesso à whitelist.",
+  });
+});
+
+app.patch("/api/admin/users/:id", checkMasterAdminAccess, (req, res) => {
+  const { id } = req.params;
+  const { active, name, company } = req.body;
+  const users = loadStoredUsers();
+  const user = users.find((u) => u.id === id);
+
+  if (!user) {
+    return res.status(404).json({ error: "Usuário não encontrado." });
+  }
+
+  // Não permite desativar o Administrador Mestre
+  if (user.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase() && active === false) {
+    return res.status(400).json({ error: "O Administrador Mestre não pode ser desativado." });
+  }
+
+  if (typeof active === "boolean") user.active = active;
+  if (typeof name === "string") user.name = name.trim();
+  if (typeof company === "string") user.company = company.trim();
+
+  saveStoredUsers(users);
+  res.json({ success: true, user, message: "Usuário atualizado com sucesso." });
+});
+
+app.delete("/api/admin/users/:id", checkMasterAdminAccess, (req, res) => {
+  const { id } = req.params;
+  let users = loadStoredUsers();
+  const user = users.find((u) => u.id === id);
+
+  if (!user) {
+    return res.status(404).json({ error: "Usuário não encontrado." });
+  }
+
+  if (user.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase()) {
+    return res.status(400).json({ error: "O Administrador Mestre não pode ser excluído." });
+  }
+
+  users = users.filter((u) => u.id !== id);
+  saveStoredUsers(users);
+
+  res.json({ success: true, message: "Usuário removido da whitelist com sucesso." });
+});
+
+// 2. Gestão de Diretrizes e Leis do Sistema
+app.get("/api/admin/directives", checkMasterAdminAccess, (req, res) => {
+  const directives = loadStoredDirectives();
+  res.json({
+    success: true,
+    directives,
+    total: directives.length,
+    activeCount: directives.filter((d) => d.active).length,
+  });
+});
+
+app.post("/api/admin/directives", checkMasterAdminAccess, (req, res) => {
+  const { title, code, category, description, content } = req.body;
+  if (!title || !content) {
+    return res.status(400).json({ error: "Título e conteúdo da diretriz são obrigatórios." });
+  }
+
+  const directives = loadStoredDirectives();
+  const newDirective: StoredDirective = {
+    id: `dir-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    title: String(title).trim(),
+    code: (code && String(code).trim()) || `DIR-${directives.length + 1}`,
+    category: category || "diretriz_geral",
+    description: (description && String(description).trim()) || "",
+    content: String(content).trim(),
+    active: true,
+    isBuiltIn: false,
+    updatedAt: new Date().toISOString(),
+  };
+
+  directives.push(newDirective);
+  saveStoredDirectives(directives);
+
+  res.status(201).json({
+    success: true,
+    directive: newDirective,
+    message: "Diretriz/Norma adicionada com sucesso.",
+  });
+});
+
+app.patch("/api/admin/directives/:id", checkMasterAdminAccess, (req, res) => {
+  const { id } = req.params;
+  const { title, code, category, description, content, active } = req.body;
+  const directives = loadStoredDirectives();
+  const directive = directives.find((d) => d.id === id);
+
+  if (!directive) {
+    return res.status(404).json({ error: "Diretriz não encontrada." });
+  }
+
+  if (typeof active === "boolean") directive.active = active;
+  if (typeof title === "string") directive.title = title.trim();
+  if (typeof code === "string") directive.code = code.trim();
+  if (typeof category === "string") directive.category = category as any;
+  if (typeof description === "string") directive.description = description.trim();
+  if (typeof content === "string") directive.content = content.trim();
+  directive.updatedAt = new Date().toISOString();
+
+  saveStoredDirectives(directives);
+  res.json({ success: true, directive, message: "Diretriz atualizada com sucesso." });
+});
+
+app.delete("/api/admin/directives/:id", checkMasterAdminAccess, (req, res) => {
+  const { id } = req.params;
+  let directives = loadStoredDirectives();
+  const directive = directives.find((d) => d.id === id);
+
+  if (!directive) {
+    return res.status(404).json({ error: "Diretriz não encontrada." });
+  }
+
+  directives = directives.filter((d) => d.id !== id);
+  saveStoredDirectives(directives);
+
+  res.json({ success: true, message: "Diretriz excluída com sucesso." });
 });
 
 
