@@ -146,12 +146,13 @@ export default function App() {
     }
   }, [currentUser]);
 
-  const fetchDriveStatus = async (folderToQuery?: string) => {
+  const fetchDriveStatus = async (folderToQuery?: string, forceRefresh = false) => {
     if (!currentUser) return;
     setIsDriveLoading(true);
     try {
       const q = folderToQuery !== undefined ? folderToQuery : driveFolderId;
-      const res = await fetch(`/api/drive/status?folderId=${encodeURIComponent(q)}`, {
+      const refreshParam = forceRefresh ? '&refresh=true' : '';
+      const res = await fetch(`/api/drive/status?folderId=${encodeURIComponent(q)}${refreshParam}`, {
         headers: getAuthHeaders(),
       });
 
@@ -180,7 +181,7 @@ export default function App() {
   const handleSaveDriveFolderId = async (newFolder: string) => {
     setDriveFolderId(newFolder);
     localStorage.setItem('civil_lex_drive_folder', newFolder);
-    await fetchDriveStatus(newFolder);
+    await fetchDriveStatus(newFolder, true);
   };
 
   const handleLoginSuccess = (user: UserProfile) => {
@@ -488,7 +489,7 @@ export default function App() {
         currentFolderId={driveFolderId}
         onSaveDriveFolderId={handleSaveDriveFolderId}
         driveStatus={driveStatus}
-        onRefreshDrive={() => fetchDriveStatus()}
+        onRefreshDrive={() => fetchDriveStatus(undefined, true)}
         isLoading={isDriveLoading}
       />
 
