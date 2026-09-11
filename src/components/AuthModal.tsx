@@ -143,7 +143,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     Licença não identificada
                   </p>
                   <p className="text-rose-800 leading-relaxed">
-                    A conta <strong className="underline">{deniedEmail}</strong> não consta na lista de usuários VIP com licença ativa neste repositório.
+                    A conta <strong className="underline">{deniedEmail}</strong> não foi encontrada com licença ativa.
                   </p>
                 </div>
               </div>
@@ -152,18 +152,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <p className="text-xs font-semibold text-slate-800">
                   Como liberar seu acesso:
                 </p>
-                <ul className="text-xs text-slate-600 space-y-1.5 list-disc pl-4">
-                  <li>Solicite a inclusão do seu e-mail na variável <code>ALLOWED_EMAILS</code> do servidor.</li>
-                  <li>Ou entre em contato com a equipe de suporte/administração para ativar sua chave de licença.</li>
-                </ul>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Entre em contato com o administrador para realizar a ativação do seu e-mail, clicando no botão abaixo.
+                </p>
               </div>
 
               {/* Action Buttons */}
               <div className="pt-2 flex flex-col gap-2.5">
                 <a
-                  href={`https://wa.me/?text=${encodeURIComponent(
-                    `Olá! Gostaria de solicitar a liberação de licença para o e-mail: ${deniedEmail} na plataforma de Legislação da Construção Civil.`
-                  )}`}
+                  href="https://wa.link/2zuw9s"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center justify-center gap-2 w-full py-2.5 px-4 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 shadow-md shadow-emerald-700/20 transition-all cursor-pointer"
@@ -183,6 +180,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <LogIn className="w-3.5 h-3.5 text-slate-500" />
                   <span>Entrar com outra conta Google</span>
                 </button>
+              </div>
+
+              {/* Rodapé da tela do popup de erro */}
+              <div className="pt-4 mt-2 border-t border-slate-100 text-center text-[11px] text-slate-400 space-y-0.5">
+                <p>Studio Marcelino Edificações ₢ 2026.</p>
+                <p>Todos os direitos reservados.</p>
               </div>
             </div>
           ) : (
