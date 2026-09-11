@@ -30,16 +30,23 @@ function extractDriveFolderId(input?: string): string {
   if (!input) return "";
   const trimmed = input.trim();
   // Match URLs like: https://drive.google.com/drive/folders/1aBcDeFgHijKlmNoPqrStuVwxYz
+  // or https://drive.google.com/drive/u/0/folders/1aBcDeFgHijKlmNoPqrStuVwxYz
   const match = trimmed.match(/\/folders\/([a-zA-Z0-9_-]+)/);
   if (match && match[1]) {
     return match[1];
   }
-  // Match query parameter ?id=...
+  // Match query parameter ?id=... or &id=...
   const idMatch = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
   if (idMatch && idMatch[1]) {
     return idMatch[1];
   }
-  return trimmed;
+  // Match file or folder /d/ID
+  const fileMatch = trimmed.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (fileMatch && fileMatch[1]) {
+    return fileMatch[1];
+  }
+  // Clean off query parameters or hashes if only the ID was pasted with them
+  return trimmed.split("?")[0].split("#")[0].trim();
 }
 
 // Memory cache for Google Drive files to ensure low-latency chat interactions
@@ -49,70 +56,188 @@ let driveCache: {
   files: any[];
 } | null = null;
 
+// Fallback adicional: leitura da lista pública de arquivos via visualização pública da pasta compartilhada
+async function scrapePublicDriveFolder(folderId: string): Promise<any[]> {
+  try {
+    const publicUrl = `https://drive.google.com/embeddedfolderview?id=${encodeURIComponent(folderId)}#list`;
+    const res = await fetch(publicUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+    });
+
+    if (!res.ok) return [];
+
+    const html = await res.text();
+    const files: any[] = [];
+    const seenIds = new Set<string>();
+
+    // 1. Links para arquivos: /file/d/{id}/view
+    const linkRegex = /href="https:\/\/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)\/[^"]*"[^>]*>([^<]+)<\/a>/gi;
+    let match;
+    while ((match = linkRegex.exec(html)) !== null) {
+      const fileId = match[1];
+      const fileName = match[2]?.trim();
+      if (fileId && fileName && !seenIds.has(fileId)) {
+        seenIds.add(fileId);
+        files.push({
+          id: fileId,
+          name: fileName,
+          mimeType: fileName.toLowerCase().endsWith(".pdf") ? "application/pdf" : "application/octet-stream",
+          webViewLink: `https://drive.google.com/file/d/${fileId}/view?usp=sharing`,
+          webContentLink: `https://drive.google.com/uc?export=download&id=${fileId}`,
+        });
+      }
+    }
+
+    // 2. Elementos data-id da interface embeddedfolderview
+    const entryRegex = /data-id="([a-zA-Z0-9_-]+)"[^>]*data-name="([^"]+)"/gi;
+    while ((match = entryRegex.exec(html)) !== null) {
+      const fileId = match[1];
+      const fileName = match[2]?.trim();
+      if (fileId && fileName && !seenIds.has(fileId)) {
+        seenIds.add(fileId);
+        files.push({
+          id: fileId,
+          name: fileName,
+          mimeType: fileName.toLowerCase().endsWith(".pdf") ? "application/pdf" : "application/octet-stream",
+          webViewLink: `https://drive.google.com/file/d/${fileId}/view?usp=sharing`,
+          webContentLink: `https://drive.google.com/uc?export=download&id=${fileId}`,
+        });
+      }
+    }
+
+    return files;
+  } catch (err) {
+    console.warn("[Google Drive Fallback] Erro ao analisar visualização pública da pasta:", err);
+    return [];
+  }
+}
+
 // Função para buscar a lista de PDFs e documentos da pasta pública/compartilhada do Google Drive
 async function buscarNormasDoGoogleDrive(customFolderId?: string) {
   const folderId = extractDriveFolderId(customFolderId || process.env.GOOGLE_DRIVE_FOLDER_ID);
-  if (!folderId || !apiKey) return [];
+  if (!folderId) return [];
 
   // Check cache if less than 45 seconds old
   if (driveCache && driveCache.folderId === folderId && Date.now() - driveCache.timestamp < 45000) {
     return driveCache.files;
   }
 
-  try {
-    // Consulta os arquivos via API pública do Google Drive v3
-    const url = `https://www.googleapis.com/drive/v3/files?q='${encodeURIComponent(
-      folderId
-    )}'+in+parents+and+trashed=false&key=${apiKey}&fields=files(id,name,mimeType,webContentLink,webViewLink,size,description)&pageSize=100`;
+  let files: any[] = [];
+  const query = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
+  const fields = encodeURIComponent("files(id,name,mimeType,webContentLink,webViewLink,size,description)");
 
-    const response = await fetch(url);
-    if (!response.ok) {
-      const errText = await response.text();
-      console.warn("Google Drive API response not OK:", response.status, errText);
-      return [];
+  // 1. Requisição principal da API do Google Drive v3 com os parâmetros obrigatórios:
+  // supportsAllDrives=true&includeItemsFromAllDrives=true&key=${apiKey}
+  if (apiKey) {
+    try {
+      const primaryUrl = `https://www.googleapis.com/drive/v3/files?q=${query}&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100&fields=${fields}&key=${apiKey}`;
+      const response = await fetch(primaryUrl);
+
+      if (response.ok) {
+        const data: any = await response.json();
+        files = data.files || [];
+      } else {
+        const errText = await response.text();
+        console.warn(
+          `[Google Drive API v3] Requisição com API Key retornou status HTTP ${response.status}: ${errText}. Acionando fallback resiliente...`
+        );
+      }
+    } catch (apiErr: any) {
+      console.warn("[Google Drive API v3] Falha na requisição principal:", apiErr.message);
     }
+  }
 
-    const data: any = await response.json();
-    const files = data.files || [];
+  // 2. Lógica de Fallback de Resiliência:
+  // Se a requisição com a API Key retornar status de erro (como 401 ou 400),
+  // faz fetch para a URL pública (sem a query key) para ler pastas configuradas como "Qualquer pessoa com o link"
+  if (files.length === 0) {
+    try {
+      const fallbackUrl = `https://www.googleapis.com/drive/v3/files?q=${query}&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100&fields=${fields}`;
+      const fallbackRes = await fetch(fallbackUrl);
 
-    // Optional: fetch text snippets for plain text or Google Docs if present
-    for (const file of files) {
-      if (file.mimeType === "application/vnd.google-apps.document") {
-        try {
-          const exportUrl = `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/plain&key=${apiKey}`;
+      if (fallbackRes.ok) {
+        const data: any = await fallbackRes.json();
+        files = data.files || [];
+      } else {
+        console.warn(
+          `[Google Drive API v3 Fallback] URL pública sem chave retornou HTTP ${fallbackRes.status}. Tentando leitor de pasta compartilhada...`
+        );
+      }
+    } catch (fallbackErr: any) {
+      console.warn("[Google Drive API v3 Fallback] Erro na consulta da URL pública:", fallbackErr.message);
+    }
+  }
+
+  // 3. Fallback adicional para garantir leitura de pasta pública mesmo sem permissões da API v3
+  if (files.length === 0) {
+    files = await scrapePublicDriveFolder(folderId);
+  }
+
+  // 4. Extração de Conteúdo (Snippets) para Google Docs e arquivos de texto
+  for (const file of files) {
+    if (file.mimeType === "application/vnd.google-apps.document") {
+      try {
+        let docText = "";
+        // Tentativa com API v3
+        if (apiKey) {
+          const exportUrl = `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/plain&supportsAllDrives=true&key=${apiKey}`;
           const exportRes = await fetch(exportUrl);
           if (exportRes.ok) {
-            const docText = await exportRes.text();
-            file.contentSnippet = docText.slice(0, 5000);
+            docText = await exportRes.text();
           }
-        } catch {
-          // ignore export errors
         }
-      } else if (file.mimeType === "text/plain" || file.name.endsWith(".txt") || file.name.endsWith(".md")) {
-        try {
-          const mediaUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&key=${apiKey}`;
+        // Fallback de exportação pública
+        if (!docText) {
+          const publicExportUrl = `https://docs.google.com/document/d/${file.id}/export?format=txt`;
+          const publicExportRes = await fetch(publicExportUrl);
+          if (publicExportRes.ok) {
+            docText = await publicExportRes.text();
+          }
+        }
+        if (docText) {
+          file.contentSnippet = docText.slice(0, 5000);
+        }
+      } catch {
+        // ignore export errors
+      }
+    } else if (file.mimeType === "text/plain" || file.name?.endsWith(".txt") || file.name?.endsWith(".md")) {
+      try {
+        let text = "";
+        // Tentativa com API v3
+        if (apiKey) {
+          const mediaUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&supportsAllDrives=true&key=${apiKey}`;
           const mediaRes = await fetch(mediaUrl);
           if (mediaRes.ok) {
-            const text = await mediaRes.text();
-            file.contentSnippet = text.slice(0, 5000);
+            text = await mediaRes.text();
           }
-        } catch {
-          // ignore media download errors
         }
+        // Fallback de download público
+        if (!text) {
+          const publicMediaUrl = `https://drive.google.com/uc?export=download&id=${file.id}`;
+          const publicMediaRes = await fetch(publicMediaUrl);
+          if (publicMediaRes.ok) {
+            text = await publicMediaRes.text();
+          }
+        }
+        if (text) {
+          file.contentSnippet = text.slice(0, 5000);
+        }
+      } catch {
+        // ignore media download errors
       }
     }
-
-    driveCache = {
-      folderId,
-      timestamp: Date.now(),
-      files,
-    };
-
-    return files;
-  } catch (error) {
-    console.error("Erro ao buscar arquivos do Google Drive:", error);
-    return [];
   }
+
+  driveCache = {
+    folderId,
+    timestamp: Date.now(),
+    files,
+  };
+
+  return files;
 }
 
 // Health check endpoint
@@ -142,15 +267,6 @@ app.get("/api/drive/status", async (req, res) => {
       });
     }
 
-    if (!apiKey) {
-      return res.json({
-        configured: false,
-        folderId,
-        files: [],
-        error: "Chave GEMINI_API_KEY não configurada.",
-      });
-    }
-
     const files = await buscarNormasDoGoogleDrive(folderId);
 
     return res.json({
@@ -159,6 +275,10 @@ app.get("/api/drive/status", async (req, res) => {
       files,
       count: files.length,
       lastChecked: new Date().toISOString(),
+      message:
+        files.length > 0
+          ? `${files.length} arquivo(s) carregado(s) da pasta do Google Drive.`
+          : "Pasta configurada. Se nenhum arquivo for listado, confirme se a pasta está compartilhada como 'Qualquer pessoa com o link' em modo Leitor.",
     });
   } catch (err: any) {
     console.error("Error in /api/drive/status:", err);
