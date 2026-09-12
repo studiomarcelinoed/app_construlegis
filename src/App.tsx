@@ -1,28 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Scale, 
-  BookOpen, 
   Trash2, 
   Sparkles, 
-  ShieldCheck, 
   Plus, 
-  Download, 
-  FileText,
-  AlertCircle,
-  HelpCircle,
-  MessageSquare,
-  FolderSync,
-  Lock,
-  MessageCircle
+  MessageSquare, 
+  Lock, 
+  MessageCircle,
+  History
 } from 'lucide-react';
-import { LawDocument, ChatMessage, AnalysisResult, DriveStatus, UserProfile, AuthConfig } from './types';
+import { LawDocument, ChatMessage, AnalysisResult, DriveStatus, UserProfile, AuthConfig, ChatSession } from './types';
 import { getInitialDocuments, saveCustomDocuments } from './utils/documentStore';
 import { Header } from './components/Header';
+import { ChatSidebar } from './components/ChatSidebar';
 import { MessageItem } from './components/MessageItem';
 import { ChatInput } from './components/ChatInput';
 import { SamplePrompts } from './components/SamplePrompts';
-import { DocumentModal } from './components/DocumentModal';
-import { NewDocumentModal } from './components/NewDocumentModal';
 import { DocumentViewerModal } from './components/DocumentViewerModal';
 import { GoogleDriveModal } from './components/GoogleDriveModal';
 import { AuthModal } from './components/AuthModal';
@@ -32,15 +25,15 @@ const INITIAL_WELCOME_MESSAGE: ChatMessage = {
   id: 'msg-welcome',
   sender: 'assistant',
   timestamp: new Date().toISOString(),
-  text: 'Olá! Sou o Assistente Especializado em Legislação da Construção Civil.',
+  text: 'Olá! Sou o ConstruLegis, seu assistente especializado em Legislação e Normas da Construção Civil.',
   analysis: {
-    verdict: 'Repositório Jurídico e Técnico Conectado ao Google Drive',
+    verdict: 'Repositório Normativo e Técnico Conectado',
     status: 'informativo',
     practicalGuidance: [
-      'Faça perguntas técnicas sobre normas da ABNT (NBR 9050, 14718, 15575), NR-18 ou Código de Obras.',
-      'A consulta é realizada diretamente nos PDFs e leis da sua pasta compartilhada do Google Drive, trazendo links e citações diretas.',
+      'Faça perguntas técnicas sobre normas da ABNT (NBR 9050, 14718, 15575), NR-18 ou Códigos de Obras.',
+      'A consulta analisa o repertório normativo e a legislação da construção civil, fornecendo embasamento técnico e citações precisas.',
       'Envie fotos de obras, escadas, rampas, guarda-corpos ou plantas para verificação de conformidade visual.',
-      'Clique em "Google Drive" no topo para visualizar os arquivos conectados ou alterar o link da pasta.',
+      'Suas consultas anteriores ficam salvas de forma estritamente privativa na barra lateral à esquerda.',
     ],
     citations: [
       {
@@ -66,10 +59,10 @@ const INITIAL_WELCOME_MESSAGE: ChatMessage = {
 };
 
 export default function App() {
-  // Documents state
+  // Documents state (built-in standards and norms for RAG)
   const [documents, setDocuments] = useState<LawDocument[]>(getInitialDocuments);
   
-  // Google Drive state
+  // Google Drive status state (read-only for regular users, managed by Master Admin)
   const [driveFolderId, setDriveFolderId] = useState<string>(() => {
     return localStorage.getItem('civil_lex_drive_folder') || '';
   });
@@ -94,13 +87,22 @@ export default function App() {
   const [isAccessDenied, setIsAccessDenied] = useState<boolean>(false);
   const [deniedEmail, setDeniedEmail] = useState<string>('');
 
-  // Chat state
+  // Private Chat Sessions & History State (Individual por usuário)
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [isLoadingSessions, setIsLoadingSessions] = useState<boolean>(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return window.innerWidth >= 1024;
+    }
+    return false;
+  });
+
+  // Current chat messages state: inicia sempre vazio / pronto para nova consulta
   const [messages, setMessages] = useState<ChatMessage[]>([INITIAL_WELCOME_MESSAGE]);
   const [isLoading, setIsLoading] = useState(false);
 
   // Modals state
-  const [isDocManagerOpen, setIsDocManagerOpen] = useState(false);
-  const [isNewDocModalOpen, setIsNewDocModalOpen] = useState(false);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
   const [viewingDocument, setViewingDocument] = useState<LawDocument | null>(null);
 
@@ -143,14 +145,59 @@ export default function App() {
     return headers;
   };
 
-  // Check Drive status on mount or user change
+  // Carregar histórico de conversas privativo do usuário atual
+  const loadUserSessions = async (email: string) => {
+    if (!email) {
+      setSessions([]);
+      return;
+    }
+    setIsLoadingSessions(true);
+    const localKey = `construlegis_sessions_${email.toLowerCase()}`;
+    const cached = localStorage.getItem(localKey);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed)) {
+          setSessions(parsed);
+        }
+      } catch (e) {
+        console.warn('Erro ao ler cache de sessões:', e);
+      }
+    }
+
+    try {
+      const res = await fetch('/api/chats', {
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.sessions && Array.isArray(data.sessions)) {
+          setSessions(data.sessions);
+          localStorage.setItem(localKey, JSON.stringify(data.sessions));
+        }
+      }
+    } catch (e) {
+      console.warn('Erro ao sincronizar sessões do servidor:', e);
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  };
+
+  // Check Drive status and load user sessions on mount or user change
   useEffect(() => {
     if (currentUser) {
       fetchDriveStatus(driveFolderId);
+      loadUserSessions(currentUser.email);
+      // Sempre inicia em uma conversa vazia
+      setActiveSessionId(null);
+      setMessages([INITIAL_WELCOME_MESSAGE]);
     } else {
+      setSessions([]);
+      setActiveSessionId(null);
+      setMessages([INITIAL_WELCOME_MESSAGE]);
       setIsAuthModalOpen(true);
     }
-  }, [currentUser]);
+  }, [currentUser?.email]);
 
   const fetchDriveStatus = async (folderToQuery?: string, forceRefresh = false) => {
     if (!currentUser) return;
@@ -197,6 +244,10 @@ export default function App() {
     setIsAccessDenied(false);
     setDeniedEmail('');
     fetchDriveStatus(driveFolderId);
+    loadUserSessions(user.email);
+    // Inicia conversa limpa
+    setActiveSessionId(null);
+    setMessages([INITIAL_WELCOME_MESSAGE]);
   };
 
   const handleLogout = () => {
@@ -204,35 +255,18 @@ export default function App() {
     localStorage.removeItem('civil_lex_user');
     setIsAccessDenied(false);
     setDeniedEmail('');
+    setSessions([]);
+    setActiveSessionId(null);
+    setMessages([INITIAL_WELCOME_MESSAGE]);
     setIsAuthModalOpen(true);
   };
-
-  // Save documents whenever they change
-  useEffect(() => {
-    saveCustomDocuments(documents);
-  }, [documents]);
 
   // Scroll to bottom on messages update
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  const handleToggleActiveDoc = (id: string) => {
-    setDocuments((prev) =>
-      prev.map((doc) => (doc.id === id ? { ...doc, active: !doc.active } : doc))
-    );
-  };
-
-  const handleDeleteDocument = (id: string) => {
-    if (confirm('Tem certeza que deseja remover este documento do banco próprio?')) {
-      setDocuments((prev) => prev.filter((doc) => doc.id !== id));
-    }
-  };
-
-  const handleAddDocument = (newDoc: LawDocument) => {
-    setDocuments((prev) => [newDoc, ...prev]);
-  };
-
+  // Acessar documento original em modo estritamente somente leitura
   const handleViewSourceDocByCode = (docCode: string) => {
     const cleanCode = docCode.toLowerCase().trim();
     const found = documents.find(
@@ -248,6 +282,69 @@ export default function App() {
     }
   };
 
+  // Selecionar sessão do histórico e continuar de onde parou
+  const handleSelectSession = async (sessionId: string) => {
+    const localFound = sessions.find((s) => s.id === sessionId);
+    if (localFound && localFound.messages && localFound.messages.length > 0) {
+      setActiveSessionId(sessionId);
+      setMessages(localFound.messages);
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/chats/${sessionId}`, {
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.session && Array.isArray(data.session.messages)) {
+          setActiveSessionId(sessionId);
+          setMessages(data.session.messages);
+          setSessions((prev) =>
+            prev.map((s) => (s.id === sessionId ? { ...s, ...data.session } : s))
+          );
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao carregar consulta selecionada:', err);
+    }
+  };
+
+  // Iniciar nova consulta vazia
+  const handleNewChat = () => {
+    setActiveSessionId(null);
+    setMessages([INITIAL_WELCOME_MESSAGE]);
+  };
+
+  // Excluir sessão do histórico
+  const handleDeleteSession = async (sessionId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm('Deseja excluir esta consulta do seu histórico?')) return;
+
+    try {
+      await fetch(`/api/chats/${sessionId}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+    } catch (err) {
+      console.warn('Erro ao deletar sessão no servidor:', err);
+    }
+
+    const updated = sessions.filter((s) => s.id !== sessionId);
+    setSessions(updated);
+    if (currentUser?.email) {
+      localStorage.setItem(
+        `construlegis_sessions_${currentUser.email.toLowerCase()}`,
+        JSON.stringify(updated)
+      );
+    }
+
+    if (activeSessionId === sessionId) {
+      setActiveSessionId(null);
+      setMessages([INITIAL_WELCOME_MESSAGE]);
+    }
+  };
+
   const handleSendMessage = async (
     text: string,
     imageAttachment?: { dataUrl: string; mimeType: string; name: string }
@@ -260,6 +357,12 @@ export default function App() {
       return;
     }
 
+    // Se estiver em uma consulta vazia/nova, gera um novo ID de sessão
+    const sessionIdToUse = activeSessionId || `session-${Date.now()}`;
+    if (!activeSessionId) {
+      setActiveSessionId(sessionIdToUse);
+    }
+
     // Create user message
     const userMsg: ChatMessage = {
       id: `msg-user-${Date.now()}`,
@@ -269,11 +372,14 @@ export default function App() {
       image: imageAttachment,
     };
 
-    setMessages((prev) => [...prev, userMsg]);
+    // Remove mensagem de boas-vindas inicial se for a primeira mensagem da nova consulta
+    const baseMessages = messages.filter((m) => m.id !== 'msg-welcome');
+    const messagesWithUser = [...baseMessages, userMsg];
+    setMessages(messagesWithUser);
     setIsLoading(true);
 
     try {
-      // Active documents for RAG context
+      // Documentos ativos para RAG
       const activeDocs = documents
         .filter((d) => d.active)
         .map((d) => ({
@@ -284,7 +390,7 @@ export default function App() {
           content: d.content,
         }));
 
-      // Extract raw base64 data if image is attached
+      // Imagem em base64 se anexada
       let imagePayload: { data: string; mimeType: string } | undefined = undefined;
       if (imageAttachment) {
         const parts = imageAttachment.dataUrl.split(',');
@@ -335,7 +441,46 @@ export default function App() {
         analysis: analysisData,
       };
 
-      setMessages((prev) => [...prev, assistantMsg]);
+      const finalMessages = [...messagesWithUser, assistantMsg];
+      setMessages(finalMessages);
+
+      // Gerar título descritivo da conversa a partir da pergunta do usuário
+      let sessionTitle = text.trim().slice(0, 42);
+      if (text.trim().length > 42) sessionTitle += '...';
+
+      const updatedSession: ChatSession = {
+        id: sessionIdToUse,
+        userEmail: currentUser.email,
+        title: sessionTitle || 'Consulta Técnica',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messages: finalMessages,
+        messageCount: finalMessages.length,
+        preview: assistantMsg.text.slice(0, 80),
+      };
+
+      // Atualizar estado e sincronizar localmente por usuário
+      setSessions((prev) => {
+        const exists = prev.some((s) => s.id === sessionIdToUse);
+        const nextList = exists
+          ? [updatedSession, ...prev.filter((s) => s.id !== sessionIdToUse)]
+          : [updatedSession, ...prev];
+        if (currentUser?.email) {
+          localStorage.setItem(
+            `construlegis_sessions_${currentUser.email.toLowerCase()}`,
+            JSON.stringify(nextList)
+          );
+        }
+        return nextList;
+      });
+
+      // Persistir no servidor em background
+      fetch('/api/chats', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(updatedSession),
+      }).catch((e) => console.warn('Erro ao salvar chat no backend:', e));
+
     } catch (err: any) {
       console.error('Error fetching consultation:', err);
       const errorMsg: ChatMessage = {
@@ -351,164 +496,139 @@ export default function App() {
     }
   };
 
-  const handleClearHistory = () => {
-    if (confirm('Deseja limpar o histórico atual da conversa?')) {
-      setMessages([INITIAL_WELCOME_MESSAGE]);
-    }
-  };
-
   return (
     <div className="min-h-screen flex flex-col bg-slate-100 text-slate-900 font-['Plus_Jakarta_Sans',sans-serif]">
-      {/* Top Navigation */}
+      {/* Top Navigation Bar: ConstruLegis Branding, Usuário Logado e Sair */}
       <Header
-        documents={documents}
-        driveStatus={driveStatus}
         currentUser={currentUser}
         isMasterAdmin={isMasterAdmin}
-        onOpenDocManager={() => setIsDocManagerOpen(true)}
-        onOpenNewDocModal={() => setIsNewDocModalOpen(true)}
-        onOpenDriveSettings={() => setIsDriveModalOpen(true)}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
         onOpenAdminModal={() => setIsAdminModalOpen(true)}
         onLogout={handleLogout}
+        onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
+        isSidebarOpen={isSidebarOpen}
       />
 
-      {/* Main Layout Area */}
-      <main className="flex-1 flex flex-col max-w-4xl w-full mx-auto px-4 sm:px-6 pt-6 pb-2">
-        {/* Banner de Licença Bloqueada / Whitelist 403 */}
-        {isAccessDenied && currentUser && (
-          <div className="mb-4 p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
-            <div className="flex items-center gap-2">
-              <Lock className="w-4 h-4 text-rose-600 shrink-0" />
-              <span>
-                A conta <strong>{currentUser.email}</strong> não possui licença ativa no servidor.
-              </span>
-            </div>
-            <a
-              href={`https://wa.me/?text=${encodeURIComponent(
-                `Olá! Gostaria de solicitar a liberação de licença para ${currentUser.email} na plataforma de Legislação da Construção Civil.`
-              )}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-500 shrink-0 cursor-pointer shadow-xs"
-            >
-              <MessageCircle className="w-3.5 h-3.5" />
-              <span>Liberar Licença</span>
-            </a>
-          </div>
-        )}
+      {/* Main Workspace Layout with Private Chat Sidebar */}
+      <div className="flex-1 flex w-full max-w-7xl mx-auto overflow-hidden">
+        {/* Barra Lateral: Histórico de Conversas Próprio e Privado */}
+        <ChatSidebar
+          isOpen={isSidebarOpen}
+          onClose={() => setIsSidebarOpen(false)}
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onSelectSession={handleSelectSession}
+          onNewChat={handleNewChat}
+          onDeleteSession={handleDeleteSession}
+          userEmail={currentUser?.email}
+          isLoadingSessions={isLoadingSessions}
+        />
 
-        {/* Chat Header Actions */}
-        <div className="flex items-center justify-between pb-4 border-b border-slate-200/80 mb-4">
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-600">
-            <MessageSquare className="w-4 h-4 text-blue-900" />
-            <span>Consulta Jurídica e Normativa Ativa</span>
-            <span className="text-slate-300">•</span>
-            <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-              {driveStatus?.configured && driveStatus.files.length > 0
-                ? `Google Drive Conectado (${driveStatus.files.length} normas)`
-                : 'Banco de Normas Conectado'}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleClearHistory}
-              className="text-xs text-slate-500 hover:text-rose-600 font-medium px-2 py-1 rounded-md hover:bg-slate-200/70 transition-colors cursor-pointer"
-            >
-              Limpar conversa
-            </button>
-          </div>
-        </div>
-
-        {/* Message Feed */}
-        <div className="flex-1 space-y-2">
-          {messages.map((msg) => (
-            <MessageItem
-              key={msg.id}
-              message={msg}
-              onViewSourceDoc={handleViewSourceDocByCode}
-            />
-          ))}
-
-          {/* Loading Indicator */}
-          {isLoading && (
-            <div className="flex gap-3 sm:gap-4 mb-6">
-              <div className="w-9 h-9 rounded-xl bg-blue-900 flex items-center justify-center text-amber-400 shrink-0 shadow-xs animate-pulse">
-                <Scale className="w-4 h-4" />
-              </div>
-              <div className="p-4 sm:p-5 bg-white rounded-2xl rounded-tl-xs border border-blue-200 shadow-xs max-w-md space-y-2">
-                <div className="flex items-center gap-2 text-xs font-bold text-blue-900">
-                  <Sparkles className="w-4 h-4 text-amber-500 animate-spin" />
-                  <span>Consultando Leis e Normas no Google Drive...</span>
+        {/* Área Central do Chat de Consulta */}
+        <div className="flex-1 flex flex-col min-w-0 h-[calc(100vh-4.5rem)] overflow-hidden">
+          <main className="flex-1 overflow-y-auto px-3 sm:px-6 pt-4 pb-2">
+            <div className="max-w-4xl mx-auto flex flex-col">
+              {/* Banner de Licença Bloqueada / Whitelist 403 */}
+              {isAccessDenied && currentUser && (
+                <div className="mb-4 p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
+                  <div className="flex items-center gap-2">
+                    <Lock className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span>
+                      A conta <strong>{currentUser.email}</strong> não possui licença ativa no servidor.
+                    </span>
+                  </div>
+                  <a
+                    href={`https://wa.me/?text=${encodeURIComponent(
+                      `Olá! Gostaria de solicitar a liberação de licença para ${currentUser.email} na plataforma ConstruLegis.`
+                    )}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-500 shrink-0 cursor-pointer shadow-xs"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>Liberar Licença</span>
+                  </a>
                 </div>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  Vasculhando a pasta compartilhada e o repertório ABNT, extraindo trechos literais dos artigos e estruturando parecer técnico...
-                </p>
-                <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
-                  <div className="bg-blue-900 h-full w-2/3 animate-[pulse_1.5s_infinite]"></div>
+              )}
+
+              {/* Chat Sub-Header: Status e Botão de Nova Consulta */}
+              <div className="flex items-center justify-between pb-3.5 border-b border-slate-200/80 mb-4">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                  <MessageSquare className="w-4 h-4 text-blue-900" />
+                  <span>
+                    {activeSessionId ? 'Consulta em Andamento' : 'Nova Consulta Técnica'}
+                  </span>
+                  <span className="text-slate-300">•</span>
+                  <span className="text-blue-900 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200 text-[11px] font-medium">
+                    Somente Consulta
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleNewChat}
+                    className="flex items-center gap-1.5 text-xs text-blue-900 hover:text-blue-800 font-semibold px-2.5 py-1 rounded-lg bg-white border border-slate-200 hover:border-blue-300 shadow-2xs transition-all cursor-pointer"
+                    title="Iniciar nova consulta vazia"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Nova Consulta</span>
+                  </button>
                 </div>
               </div>
+
+              {/* Message Feed */}
+              <div className="flex-1 space-y-2">
+                {messages.map((msg) => (
+                  <MessageItem
+                    key={msg.id}
+                    message={msg}
+                    onViewSourceDoc={handleViewSourceDocByCode}
+                  />
+                ))}
+
+                {/* Loading Indicator */}
+                {isLoading && (
+                  <div className="flex gap-3 sm:gap-4 mb-6">
+                    <div className="w-9 h-9 rounded-xl bg-blue-900 flex items-center justify-center text-amber-400 shrink-0 shadow-xs animate-pulse">
+                      <Scale className="w-4 h-4" />
+                    </div>
+                    <div className="p-4 sm:p-5 bg-white rounded-2xl rounded-tl-xs border border-blue-200 shadow-xs max-w-md space-y-2">
+                      <div className="flex items-center gap-2 text-xs font-bold text-blue-900">
+                        <Sparkles className="w-4 h-4 text-amber-500 animate-spin" />
+                        <span>ConstruLegis analisando normas e leis...</span>
+                      </div>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Vasculhando o repertório normativo ABNT, códigos de obras e legislação técnica para estruturação do parecer...
+                      </p>
+                      <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                        <div className="bg-blue-900 h-full w-2/3 animate-[pulse_1.5s_infinite]"></div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Suggested sample prompts if only welcome message exists */}
+                {messages.length === 1 && !isLoading && (
+                  <SamplePrompts
+                    onSelectPrompt={(promptText) => handleSendMessage(promptText)}
+                  />
+                )}
+
+                <div ref={chatEndRef} />
+              </div>
             </div>
-          )}
+          </main>
 
-          {/* Suggested sample prompts if only welcome message exists */}
-          {messages.length === 1 && !isLoading && (
-            <SamplePrompts
-              onSelectPrompt={(promptText) => handleSendMessage(promptText)}
-            />
-          )}
-
-          <div ref={chatEndRef} />
+          {/* Persistent Chat Input Bar */}
+          <ChatInput
+            onSendMessage={handleSendMessage}
+            isLoading={isLoading}
+          />
         </div>
-      </main>
+      </div>
 
-      {/* Persistent Chat Input Bar */}
-      <ChatInput
-        onSendMessage={handleSendMessage}
-        isLoading={isLoading}
-        onOpenNewDocModal={() => setIsNewDocModalOpen(true)}
-      />
-
-      {/* Modal: Document Database Management */}
-      <DocumentModal
-        isOpen={isDocManagerOpen}
-        onClose={() => setIsDocManagerOpen(false)}
-        documents={documents}
-        driveStatus={driveStatus}
-        onToggleActive={handleToggleActiveDoc}
-        onDeleteDocument={handleDeleteDocument}
-        onOpenNewDocModal={() => {
-          setIsDocManagerOpen(false);
-          setIsNewDocModalOpen(true);
-        }}
-        onViewDocument={(doc) => setViewingDocument(doc)}
-        onOpenDriveSettings={() => {
-          setIsDocManagerOpen(false);
-          setIsDriveModalOpen(true);
-        }}
-      />
-
-      {/* Modal: Google Drive Configuration */}
-      <GoogleDriveModal
-        isOpen={isDriveModalOpen}
-        onClose={() => setIsDriveModalOpen(false)}
-        currentFolderId={driveFolderId}
-        onSaveDriveFolderId={handleSaveDriveFolderId}
-        driveStatus={driveStatus}
-        onRefreshDrive={() => fetchDriveStatus(undefined, true)}
-        isLoading={isDriveLoading}
-      />
-
-      {/* Modal: Add New Document (PDF or Direct Text) */}
-      <NewDocumentModal
-        isOpen={isNewDocModalOpen}
-        onClose={() => setIsNewDocModalOpen(false)}
-        onAddDocument={handleAddDocument}
-      />
-
-      {/* Modal: Full Document Viewer */}
+      {/* Modal: Full Document Viewer (Modo Leitura de Artigos e Normas para o Usuário) */}
       <DocumentViewerModal
         document={viewingDocument}
         onClose={() => setViewingDocument(null)}
@@ -528,7 +648,7 @@ export default function App() {
         }}
       />
 
-      {/* Modal: Painel do Administrador Mestre */}
+      {/* Modal: Painel do Administrador Mestre (Exclusivo para o Master Admin) */}
       {isMasterAdmin && (
         <AdminModal
           isOpen={isAdminModalOpen}
@@ -542,7 +662,21 @@ export default function App() {
           }}
         />
       )}
+
+      {/* Modal: Google Drive Configuration (Acessível pelo Master Admin se acionado) */}
+      {isMasterAdmin && (
+        <GoogleDriveModal
+          isOpen={isDriveModalOpen}
+          onClose={() => setIsDriveModalOpen(false)}
+          currentFolderId={driveFolderId}
+          onSaveDriveFolderId={handleSaveDriveFolderId}
+          driveStatus={driveStatus}
+          onRefreshDrive={() => fetchDriveStatus(undefined, true)}
+          isLoading={isDriveLoading}
+        />
+      )}
     </div>
   );
 }
+
 

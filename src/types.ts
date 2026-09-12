@@ -119,6 +119,17 @@ export interface ChatMessage {
   error?: string;
 }
 
+export interface ChatSession {
+  id: string;
+  userEmail: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: ChatMessage[];
+  messageCount?: number;
+  preview?: string;
+}
+
 export interface ConsultationRequest {
   prompt: string;
   image?: {

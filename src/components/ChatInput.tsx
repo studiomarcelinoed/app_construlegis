@@ -4,13 +4,11 @@ import { Send, Image as ImageIcon, X, FileUp, Sparkles, Loader2, Paperclip } fro
 interface ChatInputProps {
   onSendMessage: (text: string, image?: { dataUrl: string; mimeType: string; name: string }) => void;
   isLoading: boolean;
-  onOpenNewDocModal: () => void;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSendMessage,
   isLoading,
-  onOpenNewDocModal,
 }) => {
   const [text, setText] = useState('');
   const [imagePreview, setImagePreview] = useState<{
@@ -171,16 +169,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               className="p-2 rounded-xl text-slate-500 hover:text-blue-900 hover:bg-slate-100 transition-colors cursor-pointer disabled:opacity-50"
             >
               <ImageIcon className="w-4 h-4" />
-            </button>
-
-            <button
-              type="button"
-              onClick={onOpenNewDocModal}
-              disabled={isLoading}
-              title="Subir nova lei ou código de obras em PDF/Texto"
-              className="p-2 rounded-xl text-slate-500 hover:text-blue-900 hover:bg-slate-100 transition-colors cursor-pointer disabled:opacity-50 hidden sm:flex"
-            >
-              <FileUp className="w-4 h-4" />
             </button>
 
             <button

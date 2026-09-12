@@ -1087,6 +1087,137 @@ app.delete("/api/admin/directives/:id", checkMasterAdminAccess, (req, res) => {
 });
 
 
+// ==========================================
+// HISTÓRICO DE CONVERSAS PRIVADO POR USUÁRIO
+// ==========================================
+const CHATS_DIR = path.join(DATA_DIR, "chats");
+if (!fs.existsSync(CHATS_DIR)) {
+  try {
+    fs.mkdirSync(CHATS_DIR, { recursive: true });
+  } catch (e) {
+    console.error("Erro ao criar pasta data/chats:", e);
+  }
+}
+
+function getUserChatsFilePath(userEmail: string): string {
+  const safeEmail = userEmail.toLowerCase().replace(/[^a-z0-9@._-]/g, "_");
+  return path.join(CHATS_DIR, `${safeEmail}.json`);
+}
+
+function loadUserChatSessions(userEmail: string): any[] {
+  if (!userEmail) return [];
+  const file = getUserChatsFilePath(userEmail);
+  if (!fs.existsSync(file)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch (e) {
+    console.error("Erro ao carregar sessões de chat:", e);
+    return [];
+  }
+}
+
+function saveUserChatSessions(userEmail: string, sessions: any[]): void {
+  if (!userEmail) return;
+  const file = getUserChatsFilePath(userEmail);
+  try {
+    fs.writeFileSync(file, JSON.stringify(sessions, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Erro ao salvar sessões de chat:", e);
+  }
+}
+
+// 1. Listar todas as conversas do usuário autenticado (para barra lateral)
+app.get("/api/chats", checkVipAccess, (req, res) => {
+  const userEmail = extractUserEmail(req);
+  const sessions = loadUserChatSessions(userEmail);
+  const summaries = sessions
+    .map((s) => ({
+      id: s.id,
+      title: s.title || "Nova Consulta",
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt || s.createdAt,
+      messageCount: Array.isArray(s.messages) ? s.messages.length : 0,
+      preview: Array.isArray(s.messages) && s.messages.length > 0
+        ? (s.messages[s.messages.length - 1]?.text || "").slice(0, 80)
+        : "",
+    }))
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+
+  res.json({ success: true, sessions: summaries });
+});
+
+// 2. Obter conversa específica com todas as mensagens
+app.get("/api/chats/:id", checkVipAccess, (req, res) => {
+  const userEmail = extractUserEmail(req);
+  const { id } = req.params;
+  const sessions = loadUserChatSessions(userEmail);
+  const session = sessions.find((s) => s.id === id);
+
+  if (!session) {
+    return res.status(404).json({ error: "Conversa não encontrada." });
+  }
+
+  res.json({ success: true, session });
+});
+
+// 3. Salvar ou atualizar conversa do usuário
+app.post("/api/chats", checkVipAccess, (req, res) => {
+  const userEmail = extractUserEmail(req);
+  const { id, title, messages, createdAt } = req.body;
+
+  if (!id) {
+    return res.status(400).json({ error: "ID da conversa é obrigatório." });
+  }
+
+  const sessions = loadUserChatSessions(userEmail);
+  const existingIdx = sessions.findIndex((s) => s.id === id);
+  const now = new Date().toISOString();
+
+  // Determinar título inteligente se não fornecido
+  let sessionTitle = title;
+  if (!sessionTitle && Array.isArray(messages)) {
+    const firstUserMsg = messages.find((m: any) => m.sender === "user");
+    if (firstUserMsg && firstUserMsg.text) {
+      sessionTitle = firstUserMsg.text.trim().slice(0, 45);
+      if (firstUserMsg.text.length > 45) sessionTitle += "...";
+    }
+  }
+
+  const sessionData = {
+    id,
+    userEmail,
+    title: sessionTitle || "Nova Consulta",
+    createdAt: createdAt || (existingIdx >= 0 ? sessions[existingIdx].createdAt : now),
+    updatedAt: now,
+    messages: Array.isArray(messages) ? messages : [],
+  };
+
+  if (existingIdx >= 0) {
+    sessions[existingIdx] = sessionData;
+  } else {
+    sessions.unshift(sessionData);
+  }
+
+  saveUserChatSessions(userEmail, sessions);
+  res.json({ success: true, session: sessionData });
+});
+
+// 4. Deletar conversa do usuário
+app.delete("/api/chats/:id", checkVipAccess, (req, res) => {
+  const userEmail = extractUserEmail(req);
+  const { id } = req.params;
+  let sessions = loadUserChatSessions(userEmail);
+  const exists = sessions.some((s) => s.id === id);
+
+  if (!exists) {
+    return res.status(404).json({ error: "Conversa não encontrada." });
+  }
+
+  sessions = sessions.filter((s) => s.id !== id);
+  saveUserChatSessions(userEmail, sessions);
+  res.json({ success: true, message: "Conversa excluída do histórico." });
+});
+
 // Vite middleware & static serving
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
