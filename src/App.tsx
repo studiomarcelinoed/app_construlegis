@@ -20,6 +20,7 @@ import { DocumentViewerModal } from './components/DocumentViewerModal';
 import { GoogleDriveModal } from './components/GoogleDriveModal';
 import { AuthModal } from './components/AuthModal';
 import { AdminModal } from './components/AdminModal';
+import { ChangePasswordModal } from './components/ChangePasswordModal';
 
 const INITIAL_WELCOME_MESSAGE: ChatMessage = {
   id: 'msg-welcome',
@@ -104,10 +105,13 @@ export default function App() {
 
   // Modals state
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
+  const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   const [viewingDocument, setViewingDocument] = useState<LawDocument | null>(null);
 
   const isMasterAdmin = Boolean(
-    currentUser?.email && currentUser.email.toLowerCase() === 'studio@fabianomarcelino.com'
+    currentUser &&
+      ((currentUser.email && currentUser.email.toLowerCase() === 'studio@fabianomarcelino.com') ||
+        currentUser.role === 'ADM')
   );
 
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -191,6 +195,11 @@ export default function App() {
       // Sempre inicia em uma conversa vazia
       setActiveSessionId(null);
       setMessages([INITIAL_WELCOME_MESSAGE]);
+
+      // Se usuário precisa alterar senha no primeiro acesso
+      if (currentUser.must_change_password) {
+        setIsChangePasswordOpen(true);
+      }
     } else {
       setSessions([]);
       setActiveSessionId(null);
@@ -248,6 +257,10 @@ export default function App() {
     // Inicia conversa limpa
     setActiveSessionId(null);
     setMessages([INITIAL_WELCOME_MESSAGE]);
+
+    if (user.must_change_password) {
+      setIsChangePasswordOpen(true);
+    }
   };
 
   const handleLogout = () => {
@@ -401,17 +414,29 @@ export default function App() {
         };
       }
 
-      const res = await fetch('/api/consult', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          prompt: text,
-          image: imagePayload,
-          driveFolderId: driveFolderId || undefined,
-          customDocuments: activeDocs,
-          userEmail: currentUser.email,
-        }),
-      });
+      const executeConsult = async () => {
+        return await fetch('/api/consult', {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({
+            prompt: text,
+            image: imagePayload,
+            driveFolderId: driveFolderId || undefined,
+            customDocuments: activeDocs,
+            userEmail: currentUser.email,
+          }),
+        });
+      };
+
+      let res = await executeConsult();
+
+      // Tratamento específico de erro 503 (UNAVAILABLE / high demand)
+      // Se a API retornar erro 503, faz uma nova tentativa automática (retry) após 2 segundos
+      if (res.status === 503) {
+        console.warn('API retornou 503 (sobrecarregado). Realizando nova tentativa automática após 2 segundos...');
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        res = await executeConsult();
+      }
 
       if (res.status === 401) {
         setIsAuthModalOpen(true);
@@ -426,9 +451,47 @@ export default function App() {
         throw new Error(errJson.error || 'Sua conta não possui uma licença ativa. Entre em contato para liberar seu acesso.');
       }
 
+      // Se persistir com erro 503 após o retry, dispara erro amigável sem JSON bruto
+      if (res.status === 503) {
+        throw new Error('O serviço da IA está temporariamente sobrecarregado. Por favor, tente novamente em alguns instantes.');
+      }
+
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error || `Erro na requisição (${res.status})`);
+        let errMsg = errJson.error || `Erro na requisição (${res.status})`;
+
+        if (
+          res.status === 503 ||
+          (typeof errMsg === 'string' && (
+            errMsg.includes('503') ||
+            errMsg.includes('UNAVAILABLE') ||
+            errMsg.includes('unavailable') ||
+            errMsg.includes('high demand') ||
+            errMsg.includes('sobrecarregado') ||
+            errMsg.includes('overloaded')
+          ))
+        ) {
+          throw new Error('O serviço da IA está temporariamente sobrecarregado. Por favor, tente novamente em alguns instantes.');
+        }
+
+        // Se o erro vier como string de JSON bruto, extrair a mensagem limpa
+        if (typeof errMsg === 'string' && errMsg.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(errMsg);
+            if (parsed.error?.code === 503 || parsed.error?.status === 'UNAVAILABLE') {
+              throw new Error('O serviço da IA está temporariamente sobrecarregado. Por favor, tente novamente em alguns instantes.');
+            }
+            if (parsed.error?.message) {
+              errMsg = parsed.error.message;
+            } else if (typeof parsed.error === 'string') {
+              errMsg = parsed.error;
+            }
+          } catch (e: any) {
+            if (e.message?.includes('sobrecarregado')) throw e;
+          }
+        }
+
+        throw new Error(errMsg);
       }
 
       const analysisData: AnalysisResult = await res.json();
@@ -483,12 +546,50 @@ export default function App() {
 
     } catch (err: any) {
       console.error('Error fetching consultation:', err);
+      let rawError = err?.message || 'Ocorreu um erro de comunicação com o servidor.';
+      let isOverloaded = false;
+
+      if (
+        err?.status === 503 ||
+        rawError.includes('503') ||
+        rawError.includes('UNAVAILABLE') ||
+        rawError.includes('unavailable') ||
+        rawError.includes('high demand') ||
+        rawError.includes('sobrecarregado') ||
+        rawError.includes('overloaded')
+      ) {
+        isOverloaded = true;
+      }
+
+      // Se for string de JSON bruto, limpa para não exibir JSON ao usuário
+      if (typeof rawError === 'string' && rawError.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(rawError);
+          if (parsed.error?.code === 503 || parsed.error?.status === 'UNAVAILABLE') {
+            isOverloaded = true;
+          }
+          if (parsed.error?.message) {
+            rawError = parsed.error.message;
+          } else if (typeof parsed.error === 'string') {
+            rawError = parsed.error;
+          }
+        } catch {
+          // fallback
+        }
+      }
+
+      const friendlyMessage = isOverloaded
+        ? 'O serviço da IA está temporariamente sobrecarregado. Por favor, tente novamente em alguns instantes.'
+        : rawError;
+
       const errorMsg: ChatMessage = {
         id: `msg-err-${Date.now()}`,
         sender: 'assistant',
-        text: 'Não foi possível processar a consulta.',
+        text: isOverloaded
+          ? 'O serviço da IA está temporariamente sobrecarregado. Por favor, tente novamente em alguns instantes.'
+          : 'Não foi possível processar a consulta.',
         timestamp: new Date().toISOString(),
-        error: err.message || 'Ocorreu um erro de comunicação com o servidor.',
+        error: friendlyMessage,
       };
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
@@ -504,6 +605,7 @@ export default function App() {
         isMasterAdmin={isMasterAdmin}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
         onOpenAdminModal={() => setIsAdminModalOpen(true)}
+        onOpenChangePassword={() => setIsChangePasswordOpen(true)}
         onLogout={handleLogout}
         onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
         isSidebarOpen={isSidebarOpen}
@@ -522,15 +624,17 @@ export default function App() {
           onDeleteSession={handleDeleteSession}
           userEmail={currentUser?.email}
           isLoadingSessions={isLoadingSessions}
+          isMasterAdmin={isMasterAdmin}
+          onOpenAdmin={() => setIsAdminModalOpen(true)}
         />
 
         {/* Área Central do Chat de Consulta */}
-        <div className="flex-1 flex flex-col min-w-0 h-[calc(100vh-4.5rem)] overflow-hidden">
-          <main className="flex-1 overflow-y-auto px-3 sm:px-6 pt-4 pb-2">
-            <div className="max-w-4xl mx-auto flex flex-col">
+        <div className="flex-1 flex flex-col min-w-0 w-full max-w-full h-[calc(100dvh-3.75rem)] sm:h-[calc(100dvh-4.5rem)] overflow-hidden">
+          <main className="flex-1 overflow-y-auto overflow-x-hidden px-2.5 sm:px-6 pt-2.5 sm:pt-4 pb-2 w-full max-w-full">
+            <div className="max-w-4xl mx-auto flex flex-col w-full min-w-0">
               {/* Banner de Licença Bloqueada / Whitelist 403 */}
               {isAccessDenied && currentUser && (
-                <div className="mb-4 p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
+                <div className="mb-3 sm:mb-4 p-3 sm:p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 sm:gap-3 shadow-xs">
                   <div className="flex items-center gap-2">
                     <Lock className="w-4 h-4 text-rose-600 shrink-0" />
                     <span>
@@ -543,7 +647,7 @@ export default function App() {
                     )}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-500 shrink-0 cursor-pointer shadow-xs"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-500 shrink-0 cursor-pointer shadow-xs text-xs"
                   >
                     <MessageCircle className="w-3.5 h-3.5" />
                     <span>Liberar Licença</span>
@@ -552,33 +656,34 @@ export default function App() {
               )}
 
               {/* Chat Sub-Header: Status e Botão de Nova Consulta */}
-              <div className="flex items-center justify-between pb-3.5 border-b border-slate-200/80 mb-4">
-                <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
-                  <MessageSquare className="w-4 h-4 text-blue-900" />
-                  <span>
-                    {activeSessionId ? 'Consulta em Andamento' : 'Nova Consulta Técnica'}
+              <div className="flex items-center justify-between pb-2.5 sm:pb-3.5 border-b border-slate-200/80 mb-3 sm:mb-4 gap-2">
+                <div className="flex items-center gap-1.5 sm:gap-2 text-xs font-semibold text-slate-700 min-w-0">
+                  <MessageSquare className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-900 shrink-0" />
+                  <span className="truncate text-[11px] sm:text-xs">
+                    {activeSessionId ? 'Consulta em Andamento' : 'Nova Consulta'}
                   </span>
                   <span className="text-slate-300">•</span>
-                  <span className="text-blue-900 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200 text-[11px] font-medium">
+                  <span className="text-blue-900 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200 text-[10px] sm:text-[11px] font-medium shrink-0">
                     Somente Consulta
                   </span>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
                     onClick={handleNewChat}
-                    className="flex items-center gap-1.5 text-xs text-blue-900 hover:text-blue-800 font-semibold px-2.5 py-1 rounded-lg bg-white border border-slate-200 hover:border-blue-300 shadow-2xs transition-all cursor-pointer"
+                    className="flex items-center gap-1 text-[11px] sm:text-xs text-blue-900 hover:text-blue-800 font-semibold px-2 sm:px-2.5 py-1 rounded-lg bg-white border border-slate-200 hover:border-blue-300 shadow-2xs transition-all cursor-pointer shrink-0"
                     title="Iniciar nova consulta vazia"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>Nova Consulta</span>
+                    <span className="hidden xs:inline">Nova Consulta</span>
+                    <span className="xs:hidden">Nova</span>
                   </button>
                 </div>
               </div>
 
               {/* Message Feed */}
-              <div className="flex-1 space-y-2">
+              <div className="flex-1 space-y-2 w-full max-w-full">
                 {messages.map((msg) => (
                   <MessageItem
                     key={msg.id}
@@ -589,16 +694,16 @@ export default function App() {
 
                 {/* Loading Indicator */}
                 {isLoading && (
-                  <div className="flex gap-3 sm:gap-4 mb-6">
-                    <div className="w-9 h-9 rounded-xl bg-blue-900 flex items-center justify-center text-amber-400 shrink-0 shadow-xs animate-pulse">
-                      <Scale className="w-4 h-4" />
+                  <div className="flex gap-2 sm:gap-4 mb-5 sm:mb-6 w-full max-w-full">
+                    <div className="w-7 h-7 sm:w-9 sm:h-9 rounded-lg sm:rounded-xl bg-blue-900 flex items-center justify-center text-amber-400 shrink-0 shadow-xs animate-pulse mt-0.5">
+                      <Scale className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                     </div>
-                    <div className="p-4 sm:p-5 bg-white rounded-2xl rounded-tl-xs border border-blue-200 shadow-xs max-w-md space-y-2">
+                    <div className="p-3.5 sm:p-5 bg-white rounded-2xl rounded-tl-xs border border-blue-200 shadow-xs max-w-md space-y-2 flex-1">
                       <div className="flex items-center gap-2 text-xs font-bold text-blue-900">
-                        <Sparkles className="w-4 h-4 text-amber-500 animate-spin" />
-                        <span>ConstruLegis analisando normas e leis...</span>
+                        <Sparkles className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-500 animate-spin shrink-0" />
+                        <span className="truncate">ConstruLegis analisando normas...</span>
                       </div>
-                      <p className="text-xs text-slate-600 leading-relaxed">
+                      <p className="text-[11px] sm:text-xs text-slate-600 leading-relaxed">
                         Vasculhando o repertório normativo ABNT, códigos de obras e legislação técnica para estruturação do parecer...
                       </p>
                       <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
@@ -673,6 +778,28 @@ export default function App() {
           driveStatus={driveStatus}
           onRefreshDrive={() => fetchDriveStatus(undefined, true)}
           isLoading={isDriveLoading}
+        />
+      )}
+
+      {/* Modal: Alteração de Senha do Usuário Autenticado */}
+      {currentUser && (
+        <ChangePasswordModal
+          isOpen={isChangePasswordOpen}
+          onClose={() => setIsChangePasswordOpen(false)}
+          currentUser={currentUser}
+          forced={Boolean(currentUser.must_change_password)}
+          onPasswordChanged={() => {
+            setCurrentUser((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    must_change_password: false,
+                    passwordChanged: true,
+                  }
+                : null
+            );
+            setIsChangePasswordOpen(false);
+          }}
         />
       )}
     </div>

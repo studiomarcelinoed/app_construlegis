@@ -1,0 +1,13 @@
+[
+  {
+    "id": "usr-master-01",
+    "email": "studio@fabianomarcelino.com",
+    "name": "Fabiano Marcelino (Administrador)",
+    "company": "Estúdio Marcelino",
+    "password": "Fsm201604!",
+    "passwordChanged": false,
+    "active": true,
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "isMaster": true
+  }
+]

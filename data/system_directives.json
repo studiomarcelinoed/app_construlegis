@@ -1,0 +1,57 @@
+[
+  {
+    "id": "dir-01",
+    "title": "Veredito Técnico e Implicações Práticas",
+    "code": "SISTEMA-DIR-01",
+    "category": "prompt_comportamento",
+    "description": "Determina que toda resposta deve abrir com um veredito claro e passos práticos acionáveis para canteiro de obras.",
+    "content": "Priorize sempre a clareza prática. Aponte se a situação está Conforme, Não Conforme ou sob Atenção. Detalhe o passo a passo de como o engenheiro ou mestre deve agir no canteiro.",
+    "active": true,
+    "isBuiltIn": true,
+    "updatedAt": "2026-01-01T00:00:00.000Z"
+  },
+  {
+    "id": "dir-02",
+    "title": "Citações Literais e Conexão com Google Drive",
+    "code": "SISTEMA-DIR-02",
+    "category": "diretriz_geral",
+    "description": "Obrigatoriedade de extrair trechos literais dos documentos do Google Drive e citar fontes reais.",
+    "content": "Para qualquer afirmação técnica, mencione o artigo, item e trecho literal exato presente nas normas da pasta do Google Drive ou da legislação brasileira. Crie links diretos para os arquivos do Drive nos campos de citação.",
+    "active": true,
+    "isBuiltIn": true,
+    "updatedAt": "2026-01-01T00:00:00.000Z"
+  },
+  {
+    "id": "dir-03",
+    "title": "Análise de Riscos Jurídicos, Multas e Habite-se",
+    "code": "SISTEMA-DIR-03",
+    "category": "legislacao",
+    "description": "Alerta sobre embargos, penalidades de prefeituras, ações judiciais de vizinhos e responsabilidade técnica civil/criminal.",
+    "content": "Identifique expressamente o risco de embargo de obra, multas fiscais municipais, reprovação de Habite-se, ação de vizinho no prazo decadencial de ano e dia (Art. 1.302 CC) e necessidade de emissão/retificação de ART/RRT.",
+    "active": true,
+    "isBuiltIn": true,
+    "updatedAt": "2026-01-01T00:00:00.000Z"
+  },
+  {
+    "id": "dir-04",
+    "title": "Acessibilidade ABNT NBR 9050:2020",
+    "code": "NBR 9050:2020",
+    "category": "norma_tecnica",
+    "description": "Parâmetros para rampas (máx 8,33%), vãos de portas (mín 0,80m), escadas (Blondel) e sanitários acessíveis (giro 1,50m).",
+    "content": "Rampas em novas construções: inclinação máxima de 8,33% com desnível máx 0,80m por lance. Portas em rotas acessíveis: vão livre útil mín 0,80m. Escadas: 63cm <= 2E + P <= 65cm. Sanitários acessíveis: área de manobra com diâmetro mín de 1,50m e barras a 0,75m.",
+    "active": true,
+    "isBuiltIn": true,
+    "updatedAt": "2026-01-01T00:00:00.000Z"
+  },
+  {
+    "id": "dir-05",
+    "title": "Direito de Construir e Vizinhança (Código Civil)",
+    "code": "Arts. 1.299 a 1.313 CC",
+    "category": "legislacao",
+    "description": "Distância mínima de 1,50m para janelas e terraços em relação à divisa; 0,75m para visões perpendiculares.",
+    "content": "Art. 1.301: É defeso abrir janelas ou fazer eirado, terraço ou varanda a menos de metro e meio (1,50m) do terreno vizinho. Janelas perpendiculares/oblíquas: mínimo de 75 cm. Prazo de ano e dia para impugnação e desfazimento (Art. 1.302).",
+    "active": true,
+    "isBuiltIn": true,
+    "updatedAt": "2026-01-01T00:00:00.000Z"
+  }
+]

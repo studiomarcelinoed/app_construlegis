@@ -23,6 +23,8 @@ interface ChatSidebarProps {
   onDeleteSession: (sessionId: string, e: React.MouseEvent) => void;
   userEmail?: string;
   isLoadingSessions?: boolean;
+  isMasterAdmin?: boolean;
+  onOpenAdmin?: () => void;
 }
 
 export const ChatSidebar: React.FC<ChatSidebarProps> = ({
@@ -35,6 +37,8 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
   onDeleteSession,
   userEmail,
   isLoadingSessions,
+  isMasterAdmin,
+  onOpenAdmin,
 }) => {
   const [searchTerm, setSearchTerm] = React.useState('');
 
@@ -73,12 +77,12 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
 
       {/* Sidebar Panel */}
       <aside
-        className={`fixed lg:static top-0 bottom-0 left-0 z-40 w-72 sm:w-80 bg-white border-r border-slate-200/90 shadow-xl lg:shadow-none flex flex-col transition-transform duration-200 ease-in-out shrink-0 ${
+        className={`fixed lg:static top-0 bottom-0 left-0 z-40 w-[85vw] max-w-xs sm:w-80 bg-white border-r border-slate-200/90 shadow-xl lg:shadow-none flex flex-col transition-transform duration-200 ease-in-out shrink-0 ${
           isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0 lg:w-0 lg:overflow-hidden lg:border-none'
         }`}
       >
         {/* Sidebar Header */}
-        <div className="p-4 border-b border-slate-100 flex items-center justify-between gap-2">
+        <div className="p-3.5 sm:p-4 border-b border-slate-100 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-8 h-8 rounded-lg bg-blue-900/10 text-blue-900 flex items-center justify-center shrink-0">
               <MessageSquare className="w-4 h-4" />
@@ -96,6 +100,7 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
             onClick={onClose}
             className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
             title="Recolher barra lateral"
+            aria-label="Fechar barra lateral"
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
@@ -184,7 +189,8 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
                       id={`btn-delete-session-${s.id}`}
                       onClick={(e) => onDeleteSession(s.id, e)}
                       title="Excluir consulta do histórico"
-                      className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-all cursor-pointer shrink-0"
+                      aria-label="Excluir consulta"
+                      className="opacity-60 sm:opacity-0 sm:group-hover:opacity-100 p-1.5 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-all cursor-pointer shrink-0"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -196,7 +202,26 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
         </div>
 
         {/* Sidebar Footer: Privacy & User ID */}
-        <div className="p-3 border-t border-slate-100 bg-slate-50/80 text-[11px] text-slate-500 space-y-1">
+        <div className="p-3 border-t border-slate-100 bg-slate-50/80 text-[11px] text-slate-500 space-y-2">
+          {isMasterAdmin && onOpenAdmin && (
+            <button
+              id="btn-sidebar-admin-panel"
+              onClick={() => {
+                onOpenAdmin();
+                if (window.innerWidth < 1024) onClose();
+              }}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-950 font-bold text-xs transition-all cursor-pointer border border-amber-500/30 active:scale-[0.98]"
+            >
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-amber-800 shrink-0" />
+                <span>Painel ADM</span>
+              </div>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500 text-slate-950 font-extrabold uppercase">
+                ADM
+              </span>
+            </button>
+          )}
+
           <div className="flex items-center gap-1.5 font-semibold text-slate-700 truncate">
             <Lock className="w-3.5 h-3.5 text-blue-900 shrink-0" />
             <span className="truncate">{userEmail || 'Usuário Autenticado'}</span>

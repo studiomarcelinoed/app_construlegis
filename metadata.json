@@ -1,6 +1,8 @@
 {
-  "name": "ConstruLegis",
+  "name": "Consulta de Legislação da Construção Civil",
   "description": "Assistente de consulta e interpretação jurídica de normas técnicas (NBRs), códigos de obras e leis da construção civil com citações normativas diretas e análise multimodal de imagens e documentos.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

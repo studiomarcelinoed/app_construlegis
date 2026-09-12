@@ -58,8 +58,14 @@ export interface UserProfile {
   id: string;
   name: string;
   email: string;
+  role?: 'ADM' | 'USER';
+  must_change_password?: boolean;
+  is_blocked?: boolean;
   avatar?: string;
   token?: string;
+  isMaster?: boolean;
+  company?: string;
+  passwordChanged?: boolean;
 }
 
 export interface AuthConfig {
@@ -75,7 +81,12 @@ export interface WhitelistUser {
   id: string;
   email: string;
   name: string;
+  role?: 'ADM' | 'USER';
+  must_change_password?: boolean;
+  is_blocked?: boolean;
   company?: string;
+  password?: string;
+  passwordChanged?: boolean;
   active: boolean;
   createdAt: string;
   lastAccess?: string;

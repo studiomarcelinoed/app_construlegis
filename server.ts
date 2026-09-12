@@ -1,9 +1,13 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { createServer as createViteServer } from "vite";
+import * as pdfParseModule from "pdf-parse";
+const pdfParse: any = (pdfParseModule as any).default || pdfParseModule;
 
 dotenv.config();
 
@@ -26,8 +30,87 @@ const ai = apiKey
     })
   : null;
 
-// Administrador Mestre Permanente
+// Administrador Mestre Permanente e Senha Padrão
 export const MASTER_ADMIN_EMAIL = "studio@fabianomarcelino.com";
+export const MASTER_ADMIN_DEFAULT_PASSWORD = "Fsm201604!";
+
+// Supabase Client Initialization
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
+export const supabase: SupabaseClient | null =
+  SUPABASE_URL && SUPABASE_ANON_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: { persistSession: false },
+      })
+    : null;
+
+// Helpers de Criptografia e Validação de Senhas
+export function hashPassword(password: string): string {
+  return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+export function verifyPassword(plainPassword: string, storedHash?: string): boolean {
+  if (!storedHash) return false;
+  // Comparação direta (caso texto puro)
+  if (plainPassword === storedHash) return true;
+  // Comparação SHA-256
+  const hashed = hashPassword(plainPassword);
+  return hashed.toLowerCase() === storedHash.toLowerCase();
+}
+
+// Inicialização e Verificação do Administrador Mestre no Supabase
+async function initSupabaseAndMasterAdmin() {
+  if (!supabase) {
+    console.log("[Supabase] SUPABASE_URL ou SUPABASE_ANON_KEY não informados. O sistema funcionará com fallback local.");
+    return;
+  }
+
+  try {
+    console.log(`[Supabase] Conectando a ${SUPABASE_URL}... Verificando Administrador Mestre (${MASTER_ADMIN_EMAIL})...`);
+    const { data: existingUser, error } = await supabase
+      .from("users")
+      .select("id, email, password_hash, role, must_change_password, is_blocked")
+      .eq("email", MASTER_ADMIN_EMAIL.toLowerCase())
+      .maybeSingle();
+
+    if (error) {
+      console.warn("[Supabase] Aviso ao consultar tabela 'users':", error.message);
+      console.warn("[Supabase] Dica: Certifique-se de que a tabela 'users' existe no Supabase com as colunas: id, email, password_hash, name, role, must_change_password, is_blocked.");
+      return;
+    }
+
+    if (!existingUser) {
+      console.log(`[Supabase] Administrador Mestre (${MASTER_ADMIN_EMAIL}) não encontrado. Criando automaticamente...`);
+      const masterUserRecord = {
+        email: MASTER_ADMIN_EMAIL.toLowerCase(),
+        name: "Fabiano Marcelino (Administrador Mestre)",
+        password_hash: hashPassword(MASTER_ADMIN_DEFAULT_PASSWORD),
+        role: "ADM",
+        must_change_password: false,
+        is_blocked: false,
+      };
+
+      const { data: inserted, error: insertError } = await supabase
+        .from("users")
+        .insert([masterUserRecord])
+        .select()
+        .single();
+
+      if (insertError) {
+        console.error("[Supabase] Erro ao cadastrar Administrador Mestre:", insertError.message);
+      } else {
+        console.log(`[Supabase] Administrador Mestre cadastrado com sucesso! ID: ${inserted?.id}, Role: ADM`);
+      }
+    } else {
+      console.log(`[Supabase] Administrador Mestre (${MASTER_ADMIN_EMAIL}) já existe no banco. Role: ${existingUser.role}`);
+      if (existingUser.role !== "ADM") {
+        await supabase.from("users").update({ role: "ADM" }).eq("email", MASTER_ADMIN_EMAIL.toLowerCase());
+      }
+    }
+  } catch (err: any) {
+    console.error("[Supabase] Falha ao inicializar Supabase:", err.message);
+  }
+}
 
 // Arquivos locais para persistência de dados administrativos
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -47,6 +130,8 @@ export interface StoredUser {
   email: string;
   name: string;
   company?: string;
+  password?: string;
+  passwordChanged?: boolean;
   active: boolean;
   createdAt: string;
   lastAccess?: string;
@@ -73,6 +158,8 @@ function getInitialUsers(): StoredUser[] {
       email: MASTER_ADMIN_EMAIL,
       name: "Fabiano Marcelino (Administrador)",
       company: "Estúdio Marcelino",
+      password: MASTER_ADMIN_DEFAULT_PASSWORD,
+      passwordChanged: false,
       active: true,
       createdAt: new Date().toISOString(),
       isMaster: true,
@@ -92,6 +179,8 @@ function getInitialUsers(): StoredUser[] {
         email,
         name: email.split("@")[0],
         company: "Licença Autorizada",
+        password: `Constru@${Math.floor(1000 + Math.random() * 9000)}`,
+        passwordChanged: false,
         active: true,
         createdAt: new Date().toISOString(),
         isMaster: false,
@@ -169,24 +258,41 @@ export function loadStoredUsers(): StoredUser[] {
     if (fs.existsSync(USERS_FILE)) {
       const data = fs.readFileSync(USERS_FILE, "utf-8");
       const list: StoredUser[] = JSON.parse(data);
-      // Garante que o MASTER ADMIN sempre exista e esteja ativo
-      const hasMaster = list.some((u) => u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase());
-      if (!hasMaster) {
+      let needsSave = false;
+
+      // Garante que o MASTER ADMIN sempre exista, esteja ativo e tenha senha configurada
+      const masterIdx = list.findIndex((u) => u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase());
+      if (masterIdx === -1) {
         list.unshift({
           id: "usr-master-01",
           email: MASTER_ADMIN_EMAIL,
           name: "Fabiano Marcelino (Administrador)",
           company: "Estúdio Marcelino",
+          password: MASTER_ADMIN_DEFAULT_PASSWORD,
+          passwordChanged: false,
           active: true,
           createdAt: new Date().toISOString(),
           isMaster: true,
         });
+        needsSave = true;
+      } else {
+        if (!list[masterIdx].password) {
+          list[masterIdx].password = MASTER_ADMIN_DEFAULT_PASSWORD;
+          needsSave = true;
+        }
+        if (!list[masterIdx].active) {
+          list[masterIdx].active = true;
+          needsSave = true;
+        }
+      }
+
+      if (needsSave) {
         saveStoredUsers(list);
       }
       return list;
     }
   } catch (e) {
-    console.error("Erro ao ler users.json:", e);
+    console.error("Erro ao ler allowed_users.json:", e);
   }
   const defaults = getInitialUsers();
   saveStoredUsers(defaults);
@@ -197,7 +303,7 @@ export function saveStoredUsers(users: StoredUser[]): void {
   try {
     fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf-8");
   } catch (e) {
-    console.error("Erro ao salvar users.json:", e);
+    console.error("Erro ao salvar allowed_users.json:", e);
   }
 }
 
@@ -331,16 +437,47 @@ function checkVipAccess(req: express.Request, res: express.Response, next: expre
   next();
 }
 
-// Middleware: Exclusivo para o Administrador Mestre
-function checkMasterAdminAccess(req: express.Request, res: express.Response, next: express.NextFunction) {
+// Middleware: Exclusivo para o Administrador Mestre ou perfil ADM
+async function checkMasterAdminAccess(req: express.Request, res: express.Response, next: express.NextFunction) {
   const userEmail = extractUserEmail(req);
-  if (!userEmail || userEmail !== MASTER_ADMIN_EMAIL.toLowerCase()) {
+  if (!userEmail) {
     return res.status(403).json({
-      error: "Acesso restrito exclusivo para o Administrador Mestre do sistema.",
+      error: "Acesso restrito exclusivo para o Administrador (ADM).",
       code: "ADMIN_FORBIDDEN",
     });
   }
-  next();
+
+  // 1. studio@fabianomarcelino.com é Administrador Mestre permanente
+  if (userEmail === MASTER_ADMIN_EMAIL.toLowerCase()) {
+    return next();
+  }
+
+  // 2. Consulta no Supabase se o usuário possui role === 'ADM' e não está bloqueado
+  if (supabase) {
+    try {
+      const { data: dbUser } = await supabase
+        .from("users")
+        .select("role, is_blocked")
+        .eq("email", userEmail)
+        .maybeSingle();
+
+      if (dbUser && !dbUser.is_blocked && dbUser.role === "ADM") {
+        return next();
+      }
+    } catch {}
+  }
+
+  // 3. Consulta no banco local
+  const users = loadStoredUsers();
+  const u = users.find((x) => x.email.toLowerCase() === userEmail);
+  if (u && u.active && (u.isMaster || (u as any).role === "ADM")) {
+    return next();
+  }
+
+  return res.status(403).json({
+    error: "Acesso restrito exclusivo para o perfil ADM ou Administrador Mestre do sistema.",
+    code: "ADMIN_FORBIDDEN",
+  });
 }
 
 // Helper to extract clean Folder ID from a raw ID or full Google Drive URL
@@ -367,12 +504,71 @@ function extractDriveFolderId(input?: string): string {
   return trimmed.split("?")[0].split("#")[0].trim();
 }
 
+// Helper para requisições com timeout controlado (evita travamentos e timeouts do container)
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 8000): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Helper para extração resiliente de texto de PDFs utilizando pdfParse (compatível com v1 e v2)
+async function parsePdfBuffer(pdfBuffer: Buffer): Promise<{ text: string; numpages: number }> {
+  try {
+    // 1. Caso pdfParse seja função direta v1 (ex: pdfParse(buffer))
+    if (typeof pdfParse === "function" && !pdfParse.prototype?.load) {
+      const res = await pdfParse(pdfBuffer);
+      return {
+        text: res?.text || "",
+        numpages: res?.numpages || 1,
+      };
+    }
+
+    // 2. Caso pdfParse seja/contenha a classe PDFParse (v2)
+    const ParserClass = pdfParse?.PDFParse || (typeof pdfParse === "function" ? pdfParse : null);
+    if (ParserClass) {
+      const parser = new ParserClass({ data: pdfBuffer });
+      await parser.load();
+      const resultText = await parser.getText();
+      const text = typeof resultText === "string" ? resultText : (resultText?.text || "");
+      const info = await parser.getInfo().catch(() => null);
+      const numpages = info?.total || 1;
+      await parser.destroy().catch(() => {});
+      return { text, numpages };
+    }
+  } catch (err: any) {
+    console.warn("[PDFParse] Fallback na extração do PDF:", err.message || err);
+  }
+
+  // 3. Fallback de streams de texto para documentos simples
+  try {
+    const raw = pdfBuffer.toString("latin1");
+    const matches = raw.match(/\(([^)]{3,})\)\s*Tj/g);
+    if (matches && matches.length > 0) {
+      const extracted = matches.map((m) => m.slice(1, -3)).join(" ").replace(/\s+/g, " ");
+      return { text: extracted, numpages: 1 };
+    }
+  } catch {
+    // ignore
+  }
+  return { text: "", numpages: 1 };
+}
+
 // Memory cache for Google Drive files to ensure low-latency chat interactions
 let driveCache: {
   folderId: string;
   timestamp: number;
   files: any[];
 } | null = null;
+
+// Cache persistente em memória para trechos de texto extraídos de PDFs e documentos
+const driveContentCache = new Map<string, { snippet: string; pageCount?: number; timestamp: number }>();
 
 // Fallback resiliente: extrai arquivos públicos de páginas do Google Drive analisando scripts e dados serializados
 async function scrapePublicDriveFolder(folderId: string): Promise<any[]> {
@@ -406,13 +602,13 @@ async function scrapePublicDriveFolder(folderId: string): Promise<any[]> {
   try {
     const folderUrl = `https://drive.google.com/drive/folders/${encodeURIComponent(folderId)}`;
     console.log(`[Drive Sync] Consultando página pública da pasta: ${folderUrl}`);
-    const res = await fetch(folderUrl, {
+    const res = await fetchWithTimeout(folderUrl, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
-    });
+    }, 7000);
 
     if (res.ok) {
       const html = await res.text();
@@ -451,12 +647,12 @@ async function scrapePublicDriveFolder(folderId: string): Promise<any[]> {
     try {
       const publicUrl = `https://drive.google.com/embeddedfolderview?id=${encodeURIComponent(folderId)}#list`;
       console.log(`[Drive Sync] Consultando embeddedfolderview: ${publicUrl}`);
-      const res = await fetch(publicUrl, {
+      const res = await fetchWithTimeout(publicUrl, {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         },
-      });
+      }, 7000);
 
       if (res.ok) {
         const html = await res.text();
@@ -488,7 +684,7 @@ async function scrapePublicDriveFolder(folderId: string): Promise<any[]> {
   return files;
 }
 
-// Função para buscar a lista de PDFs e documentos da pasta pública/compartilhada do Google Drive
+// Função para buscar a lista de PDFs e documentos reais da pasta pública/compartilhada do Google Drive
 async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = false) {
   const folderId = extractDriveFolderId(customFolderId || process.env.GOOGLE_DRIVE_FOLDER_ID);
   if (!folderId) {
@@ -512,7 +708,7 @@ async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = 
     try {
       const primaryUrl = `https://www.googleapis.com/drive/v3/files?q=${query}&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100&fields=${fields}&key=${apiKey}`;
       console.log(`[Drive Sync] Tentativa 1: API v3 com API Key...`);
-      const response = await fetch(primaryUrl);
+      const response = await fetchWithTimeout(primaryUrl, {}, 8000);
 
       if (response.ok) {
         const data: any = await response.json();
@@ -534,7 +730,7 @@ async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = 
     try {
       const fallbackUrl = `https://www.googleapis.com/drive/v3/files?q=${query}&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100&fields=${fields}`;
       console.log(`[Drive Sync] Tentativa 2: API v3 pública sem Key...`);
-      const fallbackRes = await fetch(fallbackUrl);
+      const fallbackRes = await fetchWithTimeout(fallbackUrl, {}, 8000);
 
       if (fallbackRes.ok) {
         const data: any = await fallbackRes.json();
@@ -555,53 +751,115 @@ async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = 
     console.log(`[Drive Sync] Extração HTML finalizada: ${files.length} arquivos detectados.`);
   }
 
-  // 4. Extração de Conteúdo (Snippets) para Google Docs e arquivos de texto
+  // 4. Extração de Conteúdo Real para PDFs, Google Docs e arquivos de texto
   for (const file of files) {
-    if (file.mimeType === "application/vnd.google-apps.document") {
+    // 4.1. Verifica cache em memória
+    if (driveContentCache.has(file.id)) {
+      const cached = driveContentCache.get(file.id)!;
+      file.contentSnippet = cached.snippet;
+      if (cached.pageCount) file.pageCount = cached.pageCount;
+      continue;
+    }
+
+    // 4.2. Leitura de PDFs Reais
+    if (file.mimeType === "application/pdf" || file.name?.toLowerCase().endsWith(".pdf")) {
+      try {
+        let pdfBuffer: Buffer | null = null;
+        if (apiKey) {
+          const mediaUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&supportsAllDrives=true&key=${apiKey}`;
+          const mediaRes = await fetchWithTimeout(mediaUrl, {}, 9000);
+          if (mediaRes.ok) {
+            const ab = await mediaRes.arrayBuffer();
+            pdfBuffer = Buffer.from(ab);
+          }
+        }
+        if (!pdfBuffer) {
+          const downloadUrl = `https://drive.usercontent.google.com/download?id=${file.id}&export=download&confirm=t`;
+          const dlRes = await fetchWithTimeout(downloadUrl, { redirect: "follow" }, 9000);
+          if (dlRes.ok) {
+            const ab = await dlRes.arrayBuffer();
+            pdfBuffer = Buffer.from(ab);
+          }
+        }
+        if (!pdfBuffer) {
+          const ucUrl = `https://drive.google.com/uc?export=download&id=${file.id}`;
+          const ucRes = await fetchWithTimeout(ucUrl, { redirect: "follow" }, 9000);
+          if (ucRes.ok) {
+            const ab = await ucRes.arrayBuffer();
+            pdfBuffer = Buffer.from(ab);
+          }
+        }
+
+        if (pdfBuffer && pdfBuffer.length > 0) {
+          const parsed = await parsePdfBuffer(pdfBuffer);
+          const rawText = (parsed.text || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+          if (rawText) {
+            // Guarda até 8.000 caracteres de conteúdo normativo
+            const snippet = rawText.slice(0, 8000);
+            file.contentSnippet = snippet;
+            file.pageCount = parsed.numpages;
+            driveContentCache.set(file.id, {
+              snippet,
+              pageCount: parsed.numpages,
+              timestamp: Date.now(),
+            });
+            console.log(`[Drive PDF] PDF lido com sucesso: "${file.name}" (${parsed.numpages} páginas, ${snippet.length} caracteres extraídos).`);
+          }
+        }
+      } catch (pdfErr: any) {
+        console.warn(`[Drive PDF] Aviso na leitura do PDF "${file.name}":`, pdfErr.message || pdfErr);
+      }
+    } else if (file.mimeType === "application/vnd.google-apps.document") {
+      // 4.3. Google Docs export
       try {
         let docText = "";
         if (apiKey) {
           const exportUrl = `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/plain&supportsAllDrives=true&key=${apiKey}`;
-          const exportRes = await fetch(exportUrl);
+          const exportRes = await fetchWithTimeout(exportUrl, {}, 8000);
           if (exportRes.ok) {
             docText = await exportRes.text();
           }
         }
         if (!docText) {
           const publicExportUrl = `https://docs.google.com/document/d/${file.id}/export?format=txt`;
-          const publicExportRes = await fetch(publicExportUrl);
+          const publicExportRes = await fetchWithTimeout(publicExportUrl, {}, 8000);
           if (publicExportRes.ok) {
             docText = await publicExportRes.text();
           }
         }
         if (docText) {
-          file.contentSnippet = docText.slice(0, 5000);
+          const snippet = docText.slice(0, 8000);
+          file.contentSnippet = snippet;
+          driveContentCache.set(file.id, { snippet, timestamp: Date.now() });
         }
-      } catch {
-        // ignore export errors
+      } catch (docErr: any) {
+        console.warn(`[Drive Doc] Erro ao exportar documento "${file.name}":`, docErr.message);
       }
     } else if (file.mimeType === "text/plain" || file.name?.endsWith(".txt") || file.name?.endsWith(".md")) {
+      // 4.4. Arquivos de texto / markdown
       try {
         let text = "";
         if (apiKey) {
           const mediaUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&supportsAllDrives=true&key=${apiKey}`;
-          const mediaRes = await fetch(mediaUrl);
+          const mediaRes = await fetchWithTimeout(mediaUrl, {}, 8000);
           if (mediaRes.ok) {
             text = await mediaRes.text();
           }
         }
         if (!text) {
           const publicMediaUrl = `https://drive.google.com/uc?export=download&id=${file.id}`;
-          const publicMediaRes = await fetch(publicMediaUrl);
+          const publicMediaRes = await fetchWithTimeout(publicMediaUrl, {}, 8000);
           if (publicMediaRes.ok) {
             text = await publicMediaRes.text();
           }
         }
         if (text) {
-          file.contentSnippet = text.slice(0, 5000);
+          const snippet = text.slice(0, 8000);
+          file.contentSnippet = snippet;
+          driveContentCache.set(file.id, { snippet, timestamp: Date.now() });
         }
-      } catch {
-        // ignore media download errors
+      } catch (txtErr: any) {
+        console.warn(`[Drive Txt] Erro ao carregar arquivo de texto "${file.name}":`, txtErr.message);
       }
     }
   }
@@ -692,14 +950,17 @@ const handleConsultation = async (req: express.Request, res: express.Response) =
       const listaFormatada = arquivosDrive
         .map((f: any) => {
           let item = `- [ARQUIVO GOOGLE DRIVE] Nome: "${f.name}" | ID: ${f.id} | Link: ${f.webViewLink || f.webContentLink || "N/A"}`;
+          if (f.pageCount) {
+            item += ` | Páginas: ${f.pageCount}`;
+          }
           if (f.contentSnippet) {
-            item += `\n  Trecho do conteúdo: ${f.contentSnippet.replace(/\n+/g, " ").slice(0, 600)}...`;
+            item += `\n  CONTEÚDO NORMATIVO REAL EXTRAÍDO DO GOOGLE DRIVE:\n"""\n${f.contentSnippet.slice(0, 4000)}\n"""`;
           }
           return item;
         })
         .join("\n\n");
 
-      driveContext = `PASTA COMPARTILHADA DO GOOGLE DRIVE (${arquivosDrive.length} documentos disponíveis):\n${listaFormatada}\n`;
+      driveContext = `PASTA COMPARTILHADA DO GOOGLE DRIVE (${arquivosDrive.length} documentos reais disponíveis):\n${listaFormatada}\n`;
     }
 
     // 2. Diretrizes e instruções ativas configuradas pelo Administrador
@@ -806,28 +1067,90 @@ ${prompt || "Por favor, realize a análise técnica e jurídica com base nas nor
       text: textPrompt,
     });
 
+    // Função auxiliar para detecção de erro 503 (UNAVAILABLE / high demand / overloaded)
+    const isGemini503Unavailable = (err: any): boolean => {
+      if (!err) return false;
+      if (err.status === 503 || err.code === 503 || err.statusCode === 503) return true;
+      if (err.status === "UNAVAILABLE" || err.code === "UNAVAILABLE") return true;
+      if (err.error && (err.error.code === 503 || err.error.status === "UNAVAILABLE")) return true;
+      const str = (err.message || (typeof err === "string" ? err : "")).toLowerCase();
+      return (
+        str.includes("503") ||
+        str.includes("unavailable") ||
+        str.includes("high demand") ||
+        str.includes("overloaded") ||
+        str.includes("temporarily unavailable") ||
+        str.includes("service unavailable") ||
+        str.includes("resource has been exhausted")
+      );
+    };
+
+    // Chamada com retry automático de 2 segundos caso retorne 503 (UNAVAILABLE / high demand)
+    const callModelWithRetry = async (modelName: string) => {
+      try {
+        return await ai.models.generateContent({
+          model: modelName,
+          contents: { parts: contents },
+          config: {
+            systemInstruction: systemPrompt,
+            responseMimeType: "application/json",
+            temperature: 0.2,
+          },
+        });
+      } catch (err: any) {
+        if (isGemini503Unavailable(err)) {
+          console.warn(`[Gemini 503 UNAVAILABLE] Modelo ${modelName} sobrecarregado. Aguardando 2 segundos para nova tentativa automática...`);
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          console.log(`[Gemini Retry] Executando segunda tentativa para o modelo ${modelName}...`);
+          return await ai.models.generateContent({
+            model: modelName,
+            contents: { parts: contents },
+            config: {
+              systemInstruction: systemPrompt,
+              responseMimeType: "application/json",
+              temperature: 0.2,
+            },
+          });
+        }
+        throw err;
+      }
+    };
+
     let response;
     try {
-      response = await ai.models.generateContent({
-        model: "gemini-3.6-flash",
-        contents: { parts: contents },
-        config: {
-          systemInstruction: systemPrompt,
-          responseMimeType: "application/json",
-          temperature: 0.2,
-        },
-      });
+      response = await callModelWithRetry("gemini-3.6-flash");
     } catch (modelErr: any) {
-      console.warn("Fallback to gemini-3.8-flash:", modelErr.message);
-      response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: { parts: contents },
-        config: {
-          systemInstruction: systemPrompt,
-          responseMimeType: "application/json",
-          temperature: 0.2,
-        },
-      });
+      if (isGemini503Unavailable(modelErr)) {
+        console.warn("gemini-3.6-flash persistiu em 503 após retry. Tentando modelo alternativo gemini-3.8-flash...");
+        try {
+          response = await callModelWithRetry("gemini-3.8-flash");
+        } catch (secondErr: any) {
+          if (isGemini503Unavailable(secondErr)) {
+            console.error("Gemini persistiu em 503 (UNAVAILABLE) após retries:", secondErr.message);
+            return res.status(503).json({
+              error: "O serviço da IA está temporariamente sobrecarregado. Por favor, tente novamente em alguns instantes.",
+              code: 503,
+              status: "UNAVAILABLE",
+            });
+          }
+          throw secondErr;
+        }
+      } else {
+        console.warn("Fallback para gemini-3.8-flash:", modelErr.message);
+        try {
+          response = await callModelWithRetry("gemini-3.8-flash");
+        } catch (secondErr: any) {
+          if (isGemini503Unavailable(secondErr)) {
+            console.error("Gemini 503 em modelo alternativo:", secondErr.message);
+            return res.status(503).json({
+              error: "O serviço da IA está temporariamente sobrecarregado. Por favor, tente novamente em alguns instantes.",
+              code: 503,
+              status: "UNAVAILABLE",
+            });
+          }
+          throw secondErr;
+        }
+      }
     }
 
     const responseText = response.text?.trim();
@@ -858,6 +1181,22 @@ ${prompt || "Por favor, realize a análise técnica e jurídica com base nas nor
     }
   } catch (err: any) {
     console.error("Error in /api/consult:", err);
+    const errString = (err?.message || String(err || "")).toLowerCase();
+    if (
+      err?.status === 503 ||
+      err?.code === 503 ||
+      err?.statusCode === 503 ||
+      errString.includes("503") ||
+      errString.includes("unavailable") ||
+      errString.includes("high demand") ||
+      errString.includes("overloaded")
+    ) {
+      return res.status(503).json({
+        error: "O serviço da IA está temporariamente sobrecarregado. Por favor, tente novamente em alguns instantes.",
+        code: 503,
+        status: "UNAVAILABLE",
+      });
+    }
     return res.status(500).json({
       error: err.message || "Ocorreu um erro interno ao processar a consulta.",
     });
@@ -884,8 +1223,244 @@ app.get("/api/auth/config", (req, res) => {
   });
 });
 
+// Endpoint de login por e-mail e senha com suporte a Supabase e fallback local
+app.post("/api/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || typeof email !== "string" || !password || typeof password !== "string") {
+    return res.status(400).json({
+      success: false,
+      error: "Por favor, informe seu e-mail e sua senha de acesso.",
+      code: "MISSING_CREDENTIALS",
+    });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanPassword = password.trim();
+
+  // 1. Verificação no Supabase (se configurado)
+  if (supabase) {
+    try {
+      const { data: dbUser, error: dbError } = await supabase
+        .from("users")
+        .select("id, email, name, password_hash, role, must_change_password, is_blocked")
+        .eq("email", cleanEmail)
+        .maybeSingle();
+
+      if (!dbError && dbUser) {
+        // Verifica se o usuário está bloqueado
+        if (dbUser.is_blocked) {
+          return res.status(403).json({
+            success: false,
+            code: "USER_BLOCKED",
+            userEmail: cleanEmail,
+            error: "Usuário bloqueado no sistema. Entre em contato com o Administrador.",
+          });
+        }
+
+        // Validação da senha com suporte a SHA-256 e texto
+        const passwordValid = verifyPassword(cleanPassword, dbUser.password_hash);
+        if (!passwordValid) {
+          return res.status(401).json({
+            success: false,
+            code: "INVALID_PASSWORD",
+            error: "Senha de acesso incorreta. Verifique as credenciais ou solicite a recuperação de senha com o Administrador.",
+          });
+        }
+
+        const isMaster = dbUser.role === "ADM" || cleanEmail === MASTER_ADMIN_EMAIL.toLowerCase();
+
+        return res.json({
+          success: true,
+          user: {
+            id: String(dbUser.id),
+            email: dbUser.email,
+            name: dbUser.name || cleanEmail.split("@")[0],
+            role: dbUser.role || (isMaster ? "ADM" : "USER"),
+            isMaster,
+            must_change_password: Boolean(dbUser.must_change_password),
+            is_blocked: Boolean(dbUser.is_blocked),
+            token: dbUser.email,
+          },
+          must_change_password: Boolean(dbUser.must_change_password),
+          message: isMaster
+            ? "Sessão iniciada como Administrador Mestre."
+            : "Acesso autorizado com sucesso.",
+        });
+      }
+    } catch (err: any) {
+      console.warn("[Supabase] Aviso ao consultar login no Supabase:", err.message);
+    }
+  }
+
+  // 2. Fallback local em memória/arquivo (caso Supabase ainda não tenha sido conectado)
+  const users = loadStoredUsers();
+  let user = users.find((u) => u.email.toLowerCase() === cleanEmail);
+
+  // Se for o master admin e não constar na lista local, assegura existência
+  if (!user && cleanEmail === MASTER_ADMIN_EMAIL.toLowerCase()) {
+    user = {
+      id: "usr-master-01",
+      email: MASTER_ADMIN_EMAIL,
+      name: "Fabiano Marcelino (Administrador Mestre)",
+      company: "Estúdio Marcelino",
+      password: MASTER_ADMIN_DEFAULT_PASSWORD,
+      passwordChanged: true,
+      active: true,
+      createdAt: new Date().toISOString(),
+      isMaster: true,
+    };
+    users.push(user);
+    saveStoredUsers(users);
+  }
+
+  if (!user) {
+    return res.status(403).json({
+      success: false,
+      code: "VIP_REQUIRED",
+      userEmail: cleanEmail,
+      error: "E-mail não cadastrado na lista de acessos autorizados. Solicite sua licença com o Administrador.",
+    });
+  }
+
+  if (!user.active) {
+    return res.status(403).json({
+      success: false,
+      code: "USER_BLOCKED",
+      userEmail: cleanEmail,
+      error: "Usuário bloqueado no sistema. Entre em contato com o Administrador.",
+    });
+  }
+
+  // Verifica senha
+  const expectedPassword = user.password || (user.isMaster ? MASTER_ADMIN_DEFAULT_PASSWORD : "");
+  if (!expectedPassword || !verifyPassword(cleanPassword, expectedPassword)) {
+    return res.status(401).json({
+      success: false,
+      code: "INVALID_PASSWORD",
+      error: "Senha de acesso incorreta. Verifique as credenciais ou solicite a recuperação de senha com o Administrador.",
+    });
+  }
+
+  // Atualiza último acesso
+  user.lastAccess = new Date().toISOString();
+  saveStoredUsers(users);
+
+  const mustChange = !user.passwordChanged;
+  return res.json({
+    success: true,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      company: user.company,
+      role: user.isMaster ? "ADM" : "USER",
+      isMaster: Boolean(user.isMaster),
+      must_change_password: mustChange,
+      is_blocked: !user.active,
+      token: user.email,
+    },
+    must_change_password: mustChange,
+    message: user.isMaster
+      ? "Sessão iniciada como Administrador Mestre permanente."
+      : "Acesso autorizado com sucesso.",
+  });
+});
+
+// Endpoint de alteração de senha pelo próprio usuário autenticado
+app.post("/api/auth/change-password", async (req, res) => {
+  const { email, currentPassword, newPassword } = req.body;
+  const userEmail = extractUserEmail(req) || (email ? String(email).trim().toLowerCase() : "");
+
+  if (!userEmail) {
+    return res.status(401).json({
+      success: false,
+      error: "Sessão expirada ou usuário não autenticado.",
+    });
+  }
+
+  if (!newPassword || typeof newPassword !== "string" || newPassword.trim().length < 4) {
+    return res.status(400).json({
+      success: false,
+      error: "A nova senha deve ter no mínimo 4 caracteres.",
+    });
+  }
+
+  const cleanNewPassword = newPassword.trim();
+  const newHash = hashPassword(cleanNewPassword);
+
+  // 1. Atualiza no Supabase se disponível
+  if (supabase) {
+    try {
+      const { data: dbUser } = await supabase
+        .from("users")
+        .select("id, email, password_hash, must_change_password")
+        .eq("email", userEmail)
+        .maybeSingle();
+
+      if (dbUser) {
+        if (currentPassword && !verifyPassword(String(currentPassword).trim(), dbUser.password_hash)) {
+          return res.status(401).json({
+            success: false,
+            error: "A senha atual informada está incorreta.",
+          });
+        }
+
+        const { error: updateError } = await supabase
+          .from("users")
+          .update({
+            password_hash: newHash,
+            must_change_password: false,
+          })
+          .eq("email", userEmail);
+
+        if (updateError) {
+          console.error("[Supabase] Erro ao atualizar senha no Supabase:", updateError.message);
+        } else {
+          console.log(`[Supabase] Senha atualizada e must_change_password=false para ${userEmail}`);
+        }
+      } else if (userEmail === MASTER_ADMIN_EMAIL.toLowerCase()) {
+        await supabase.from("users").insert([{
+          email: MASTER_ADMIN_EMAIL.toLowerCase(),
+          name: "Fabiano Marcelino (Administrador Mestre)",
+          password_hash: newHash,
+          role: "ADM",
+          must_change_password: false,
+          is_blocked: false,
+        }]);
+      }
+    } catch (err: any) {
+      console.warn("[Supabase] Erro ao salvar senha no Supabase:", err.message);
+    }
+  }
+
+  // 2. Atualiza no fallback local
+  const users = loadStoredUsers();
+  const user = users.find((u) => u.email.toLowerCase() === userEmail);
+  if (user) {
+    const expectedPassword = user.password || (user.isMaster ? MASTER_ADMIN_DEFAULT_PASSWORD : "");
+    if (currentPassword !== undefined && currentPassword !== null && String(currentPassword).trim() !== "") {
+      if (!verifyPassword(String(currentPassword).trim(), expectedPassword)) {
+        return res.status(401).json({
+          success: false,
+          error: "A senha atual informada está incorreta.",
+        });
+      }
+    }
+
+    user.password = cleanNewPassword;
+    user.passwordChanged = true;
+    saveStoredUsers(users);
+  }
+
+  return res.json({
+    success: true,
+    must_change_password: false,
+    message: "Senha pessoal alterada com sucesso! Guarde sua nova senha para os próximos acessos.",
+  });
+});
+
 // Endpoint de validação de sessão/licença do usuário
-app.post("/api/auth/verify", (req, res) => {
+app.post("/api/auth/verify", async (req, res) => {
   const userEmail = extractUserEmail(req);
   if (!userEmail) {
     return res.status(401).json({
@@ -895,6 +1470,48 @@ app.post("/api/auth/verify", (req, res) => {
     });
   }
 
+  // 1. Verificação no Supabase
+  if (supabase) {
+    try {
+      const { data: dbUser } = await supabase
+        .from("users")
+        .select("id, email, name, role, must_change_password, is_blocked")
+        .eq("email", userEmail)
+        .maybeSingle();
+
+      if (dbUser) {
+        if (dbUser.is_blocked) {
+          return res.status(403).json({
+            authenticated: true,
+            isAllowed: false,
+            is_blocked: true,
+            userEmail,
+            error: "Usuário bloqueado no sistema. Entre em contato com o administrador.",
+          });
+        }
+
+        const isMaster = dbUser.role === "ADM" || userEmail === MASTER_ADMIN_EMAIL.toLowerCase();
+        return res.json({
+          authenticated: true,
+          isAllowed: true,
+          isMasterAdmin: isMaster,
+          userEmail,
+          user: {
+            id: String(dbUser.id),
+            email: dbUser.email,
+            name: dbUser.name || userEmail.split("@")[0],
+            role: dbUser.role || (isMaster ? "ADM" : "USER"),
+            isMaster,
+            must_change_password: Boolean(dbUser.must_change_password),
+            is_blocked: Boolean(dbUser.is_blocked),
+            token: dbUser.email,
+          },
+        });
+      }
+    } catch {}
+  }
+
+  // 2. Verificação fallback local
   const isAllowed = isEmailAuthorized(userEmail);
   const isMasterAdmin = userEmail === MASTER_ADMIN_EMAIL.toLowerCase();
 
@@ -908,11 +1525,27 @@ app.post("/api/auth/verify", (req, res) => {
     });
   }
 
+  const users = loadStoredUsers();
+  const user = users.find((u) => u.email.toLowerCase() === userEmail);
+
   return res.json({
     authenticated: true,
     isAllowed: true,
     isMasterAdmin,
     userEmail,
+    user: user
+      ? {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.isMaster ? "ADM" : "USER",
+          company: user.company,
+          isMaster: Boolean(user.isMaster),
+          must_change_password: !user.passwordChanged,
+          is_blocked: !user.active,
+          token: user.email,
+        }
+      : undefined,
     message: isMasterAdmin
       ? "Sessão iniciada como Administrador Mestre permanente."
       : "Acesso autorizado ao repositório jurídico.",
@@ -923,19 +1556,64 @@ app.post("/api/auth/verify", (req, res) => {
 // PAINEL DO ADMINISTRADOR (ROTAS EXCLUSIVAS)
 // ==========================================
 
-// 1. Gestão de Usuários da Whitelist
-app.get("/api/admin/users", checkMasterAdminAccess, (req, res) => {
-  const users = loadStoredUsers();
+// 1. Gestão de Usuários da Whitelist (Sincronizado com Supabase)
+app.get("/api/admin/users", checkMasterAdminAccess, async (req, res) => {
+  const localUsers = loadStoredUsers();
+
+  if (supabase) {
+    try {
+      const { data: dbUsers, error } = await supabase
+        .from("users")
+        .select("id, email, name, role, must_change_password, is_blocked, created_at");
+
+      if (!error && Array.isArray(dbUsers) && dbUsers.length > 0) {
+        // Mapeia para o formato de usuário exibido no painel
+        const mappedUsers: StoredUser[] = dbUsers.map((u: any) => {
+          const matchingLocal = localUsers.find((lu) => lu.email.toLowerCase() === u.email.toLowerCase());
+          return {
+            id: String(u.id),
+            email: u.email,
+            name: u.name || u.email.split("@")[0],
+            role: u.role || (u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase() ? "ADM" : "USER"),
+            must_change_password: Boolean(u.must_change_password),
+            is_blocked: Boolean(u.is_blocked),
+            company: matchingLocal?.company || (u.role === "ADM" ? "Estúdio Marcelino" : "Licença Autorizada"),
+            active: !u.is_blocked,
+            passwordChanged: !u.must_change_password,
+            createdAt: u.created_at || matchingLocal?.createdAt || new Date().toISOString(),
+            isMaster: u.role === "ADM" || u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase(),
+          };
+        });
+
+        return res.json({
+          success: true,
+          users: mappedUsers,
+          total: mappedUsers.length,
+          activeCount: mappedUsers.filter((u) => u.active).length,
+        });
+      }
+    } catch (e) {
+      console.warn("[Supabase] Fallback para usuários locais ao listar:", e);
+    }
+  }
+
+  const mappedLocal = localUsers.map((u) => ({
+    ...u,
+    role: (u as any).role || (u.isMaster ? "ADM" : "USER"),
+    must_change_password: !u.passwordChanged,
+    is_blocked: !u.active,
+  }));
+
   res.json({
     success: true,
-    users,
-    total: users.length,
-    activeCount: users.filter((u) => u.active).length,
+    users: mappedLocal,
+    total: mappedLocal.length,
+    activeCount: mappedLocal.filter((u) => u.active).length,
   });
 });
 
-app.post("/api/admin/users", checkMasterAdminAccess, (req, res) => {
-  const { email, name, company } = req.body;
+app.post("/api/admin/users", checkMasterAdminAccess, async (req, res) => {
+  const { email, name, company, password, role } = req.body;
   if (!email || typeof email !== "string" || !email.includes("@")) {
     return res.status(400).json({ error: "E-mail válido é obrigatório." });
   }
@@ -944,7 +1622,34 @@ app.post("/api/admin/users", checkMasterAdminAccess, (req, res) => {
   const users = loadStoredUsers();
 
   if (users.some((u) => u.email.toLowerCase() === cleanEmail)) {
-    return res.status(400).json({ error: "Este e-mail já está cadastrado na whitelist." });
+    return res.status(400).json({ error: "Este e-mail já está cadastrado no sistema." });
+  }
+
+  // Senha temporária (definida pelo ADM ou gerada automaticamente)
+  const cleanPassword = (password && String(password).trim()) || `Constru@${Math.floor(1000 + Math.random() * 9000)}`;
+  const userRole = role === "ADM" ? "ADM" : "USER";
+
+  // 1. Cadastrar diretamente na tabela users do Supabase
+  if (supabase) {
+    try {
+      const { error: insertErr } = await supabase.from("users").insert([
+        {
+          email: cleanEmail,
+          name: (name && String(name).trim()) || cleanEmail.split("@")[0],
+          password_hash: hashPassword(cleanPassword),
+          role: userRole,
+          must_change_password: true,
+          is_blocked: false,
+        },
+      ]);
+      if (insertErr) {
+        console.warn("[Supabase] Aviso ao cadastrar usuário no Supabase:", insertErr.message);
+      } else {
+        console.log(`[Supabase] Usuário ${cleanEmail} cadastrado no Supabase com sucesso.`);
+      }
+    } catch (e) {
+      console.warn("[Supabase] Erro ao sincronizar novo usuário no Supabase:", e);
+    }
   }
 
   const newUser: StoredUser = {
@@ -952,9 +1657,11 @@ app.post("/api/admin/users", checkMasterAdminAccess, (req, res) => {
     email: cleanEmail,
     name: (name && String(name).trim()) || cleanEmail.split("@")[0],
     company: (company && String(company).trim()) || "Geral",
+    password: cleanPassword,
+    passwordChanged: false,
     active: true,
     createdAt: new Date().toISOString(),
-    isMaster: cleanEmail === MASTER_ADMIN_EMAIL.toLowerCase(),
+    isMaster: cleanEmail === MASTER_ADMIN_EMAIL.toLowerCase() || userRole === "ADM",
   };
 
   users.push(newUser);
@@ -962,38 +1669,112 @@ app.post("/api/admin/users", checkMasterAdminAccess, (req, res) => {
 
   res.status(201).json({
     success: true,
-    user: newUser,
-    message: "Usuário adicionado com sucesso à whitelist.",
+    user: {
+      ...newUser,
+      role: userRole,
+      must_change_password: true,
+      is_blocked: false,
+    },
+    temporaryPassword: cleanPassword,
+    message: `Acesso criado com sucesso para ${cleanEmail}! Senha temporária: ${cleanPassword}`,
   });
 });
 
-app.patch("/api/admin/users/:id", checkMasterAdminAccess, (req, res) => {
+app.patch("/api/admin/users/:id", checkMasterAdminAccess, async (req, res) => {
   const { id } = req.params;
-  const { active, name, company } = req.body;
+  const { active, is_blocked, name, company, password, role, must_change_password } = req.body;
   const users = loadStoredUsers();
-  const user = users.find((u) => u.id === id);
+  const user = users.find((u) => u.id === id || u.email.toLowerCase() === id.toLowerCase());
 
   if (!user) {
     return res.status(404).json({ error: "Usuário não encontrado." });
   }
 
-  // Não permite desativar o Administrador Mestre
-  if (user.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase() && active === false) {
-    return res.status(400).json({ error: "O Administrador Mestre não pode ser desativado." });
+  // Não permite desativar/bloquear o Administrador Mestre
+  const blocked = typeof is_blocked === "boolean" ? is_blocked : (typeof active === "boolean" ? !active : undefined);
+  if (user.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase() && blocked === true) {
+    return res.status(400).json({ error: "O Administrador Mestre não pode ser bloqueado." });
   }
 
-  if (typeof active === "boolean") user.active = active;
+  if (typeof blocked === "boolean") user.active = !blocked;
   if (typeof name === "string") user.name = name.trim();
   if (typeof company === "string") user.company = company.trim();
+  if (typeof password === "string" && password.trim()) {
+    user.password = password.trim();
+    user.passwordChanged = false; // reset flag ao definir nova senha administrativa
+  }
+
+  // Sincroniza atualização no Supabase
+  if (supabase) {
+    try {
+      const updates: any = {};
+      if (typeof blocked === "boolean") updates.is_blocked = blocked;
+      if (typeof name === "string") updates.name = name.trim();
+      if (typeof password === "string" && password.trim()) {
+        updates.password_hash = hashPassword(password.trim());
+        updates.must_change_password = true;
+      }
+      if (typeof must_change_password === "boolean") updates.must_change_password = must_change_password;
+      if (role === "ADM" || role === "USER") updates.role = role;
+
+      if (Object.keys(updates).length > 0) {
+        await supabase.from("users").update(updates).eq("email", user.email.toLowerCase());
+      }
+    } catch (e) {
+      console.warn("[Supabase] Erro ao atualizar usuário no Supabase:", e);
+    }
+  }
 
   saveStoredUsers(users);
   res.json({ success: true, user, message: "Usuário atualizado com sucesso." });
 });
 
-app.delete("/api/admin/users/:id", checkMasterAdminAccess, (req, res) => {
+// Endpoint dedicado: Reset de Senha pelo Administrador
+app.post("/api/admin/users/:id/reset-password", checkMasterAdminAccess, async (req, res) => {
+  const { id } = req.params;
+  const { password } = req.body;
+  const users = loadStoredUsers();
+  const user = users.find((u) => u.id === id || u.email.toLowerCase() === id.toLowerCase());
+
+  if (!user) {
+    return res.status(404).json({ error: "Usuário não encontrado." });
+  }
+
+  const newTempPassword = (password && String(password).trim()) || `Constru@${Math.floor(1000 + Math.random() * 9000)}`;
+  user.password = newTempPassword;
+  user.passwordChanged = false;
+  saveStoredUsers(users);
+
+  if (supabase) {
+    try {
+      await supabase
+        .from("users")
+        .update({
+          password_hash: hashPassword(newTempPassword),
+          must_change_password: true,
+        })
+        .eq("email", user.email.toLowerCase());
+    } catch (e) {
+      console.warn("[Supabase] Erro ao resetar senha no Supabase:", e);
+    }
+  }
+
+  res.json({
+    success: true,
+    message: `Senha temporária redefinida com sucesso para o usuário ${user.email}. O usuário deverá alterá-la no próximo acesso.`,
+    temporaryPassword: newTempPassword,
+    user: {
+      id: user.id,
+      email: user.email,
+      must_change_password: true,
+    },
+  });
+});
+
+app.delete("/api/admin/users/:id", checkMasterAdminAccess, async (req, res) => {
   const { id } = req.params;
   let users = loadStoredUsers();
-  const user = users.find((u) => u.id === id);
+  const user = users.find((u) => u.id === id || u.email.toLowerCase() === id.toLowerCase());
 
   if (!user) {
     return res.status(404).json({ error: "Usuário não encontrado." });
@@ -1003,7 +1784,16 @@ app.delete("/api/admin/users/:id", checkMasterAdminAccess, (req, res) => {
     return res.status(400).json({ error: "O Administrador Mestre não pode ser excluído." });
   }
 
-  users = users.filter((u) => u.id !== id);
+  // Deleta no Supabase
+  if (supabase) {
+    try {
+      await supabase.from("users").delete().eq("email", user.email.toLowerCase());
+    } catch (e) {
+      console.warn("[Supabase] Erro ao excluir usuário no Supabase:", e);
+    }
+  }
+
+  users = users.filter((u) => u.id !== user.id);
   saveStoredUsers(users);
 
   res.json({ success: true, message: "Usuário removido da whitelist com sucesso." });
@@ -1084,6 +1874,16 @@ app.delete("/api/admin/directives/:id", checkMasterAdminAccess, (req, res) => {
   saveStoredDirectives(directives);
 
   res.json({ success: true, message: "Diretriz excluída com sucesso." });
+});
+
+app.post("/api/admin/directives/reset-defaults", checkMasterAdminAccess, (req, res) => {
+  const defaults = getInitialDirectives();
+  saveStoredDirectives(defaults);
+  res.json({
+    success: true,
+    directives: defaults,
+    message: "Diretrizes e normas padrão do sistema restauradas com sucesso.",
+  });
 });
 
 
@@ -1220,6 +2020,9 @@ app.delete("/api/chats/:id", checkVipAccess, (req, res) => {
 
 // Vite middleware & static serving
 async function startServer() {
+  // Inicialização do Supabase e verificação do Administrador Mestre
+  await initSupabaseAndMasterAdmin();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

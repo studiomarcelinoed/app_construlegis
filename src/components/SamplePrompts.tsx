@@ -46,44 +46,44 @@ const SAMPLE_PROMPTS = [
 
 export const SamplePrompts: React.FC<SamplePromptsProps> = ({ onSelectPrompt }) => {
   return (
-    <div className="my-8 max-w-4xl mx-auto px-4">
-      <div className="text-center mb-6">
-        <h2 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+    <div className="my-4 sm:my-8 max-w-4xl mx-auto px-1 sm:px-4 w-full">
+      <div className="text-center mb-4 sm:mb-6">
+        <h2 className="text-base sm:text-2xl font-bold text-slate-900 tracking-tight">
           Perguntas Frequentes e Consultas Normativas
         </h2>
-        <p className="text-sm text-slate-500 mt-1">
-          Selecione uma consulta técnica imediata ou digite sua própria dúvida e envie imagens de obras
+        <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-xl mx-auto">
+          Selecione uma consulta técnica imediata ou digite sua dúvida e envie imagens de obras
         </p>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 sm:gap-3">
         {SAMPLE_PROMPTS.map((item, idx) => (
           <button
             key={idx}
             type="button"
             onClick={() => onSelectPrompt(item.prompt)}
-            className="group flex flex-col justify-between p-4 rounded-xl bg-white border border-slate-200/90 hover:border-blue-400 hover:shadow-md transition-all text-left cursor-pointer"
+            className="group flex flex-col justify-between p-3.5 sm:p-4 rounded-xl bg-white border border-slate-200/90 hover:border-blue-400 hover:shadow-md transition-all text-left cursor-pointer w-full"
           >
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="p-2 rounded-lg bg-slate-100 group-hover:bg-blue-50 transition-colors">
+              <div className="flex items-center justify-between mb-2 gap-2">
+                <span className="p-1.5 sm:p-2 rounded-lg bg-slate-100 group-hover:bg-blue-50 transition-colors shrink-0">
                   {item.icon}
                 </span>
-                <span className="text-[11px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
+                <span className="text-[10px] sm:text-[11px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md truncate">
                   {item.norm}
                 </span>
               </div>
-              <h3 className="text-sm font-bold text-slate-900 group-hover:text-blue-900 transition-colors">
+              <h3 className="text-xs sm:text-sm font-bold text-slate-900 group-hover:text-blue-900 transition-colors leading-snug">
                 {item.title}
               </h3>
-              <p className="text-xs text-slate-500 mt-1 line-clamp-2 leading-relaxed">
+              <p className="text-[11px] sm:text-xs text-slate-500 mt-1 line-clamp-2 leading-relaxed">
                 {item.prompt}
               </p>
             </div>
 
-            <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-blue-900 group-hover:translate-x-0.5 transition-transform">
+            <div className="mt-2.5 sm:mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] sm:text-xs font-semibold text-blue-900 group-hover:translate-x-0.5 transition-transform">
               <span>Consultar Legislação</span>
-              <ArrowRight className="w-3.5 h-3.5" />
+              <ArrowRight className="w-3.5 h-3.5 shrink-0" />
             </div>
           </button>
         ))}
