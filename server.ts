@@ -560,6 +560,25 @@ async function parsePdfBuffer(pdfBuffer: Buffer): Promise<{ text: string; numpag
   return { text: "", numpages: 1 };
 }
 
+// Estrutura de blocos de texto (chunks) para a estratégia de RAG Leve
+export interface DocumentChunk {
+  id: string;
+  fileId: string;
+  fileName: string;
+  webViewLink?: string;
+  webContentLink?: string;
+  chunkIndex: number;
+  totalChunks: number;
+  text: string;
+  charCount: number;
+}
+
+export interface ScoredChunk {
+  chunk: DocumentChunk;
+  score: number;
+  matchedTerms: string[];
+}
+
 // Memory cache for Google Drive files to ensure low-latency chat interactions
 let driveCache: {
   folderId: string;
@@ -567,8 +586,239 @@ let driveCache: {
   files: any[];
 } | null = null;
 
-// Cache persistente em memória para trechos de texto extraídos de PDFs e documentos
-const driveContentCache = new Map<string, { snippet: string; pageCount?: number; timestamp: number }>();
+// Cache persistente em memória para textos completos e blocos estruturados de documentos
+const driveContentCache = new Map<
+  string,
+  {
+    fullText: string;
+    snippet: string;
+    pageCount?: number;
+    timestamp: number;
+    chunks: DocumentChunk[];
+  }
+>();
+
+// Acervo global em memória contendo todos os chunks indexados das normas do Google Drive
+let globalDriveChunks: DocumentChunk[] = [];
+
+// Divide o texto de cada norma/lei em blocos menores (chunks) de aprox. 1000 a 1500 caracteres
+function chunkDocumentText(
+  file: { id: string; name: string; webViewLink?: string; webContentLink?: string },
+  fullText: string,
+  targetChunkSize = 1250,
+  overlap = 150
+): DocumentChunk[] {
+  if (!fullText || typeof fullText !== "string" || !fullText.trim()) {
+    return [];
+  }
+
+  const clean = fullText.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const chunks: DocumentChunk[] = [];
+  let startIndex = 0;
+  let chunkIndex = 0;
+
+  while (startIndex < clean.length) {
+    let endIndex = startIndex + targetChunkSize;
+
+    if (endIndex < clean.length) {
+      // Prioridade 1: Quebra de parágrafo duplo (\n\n)
+      const paragraphBreak = clean.lastIndexOf("\n\n", endIndex);
+      // Prioridade 2: Fim de frase (. ou ; ou :)
+      const sentenceBreak = Math.max(
+        clean.lastIndexOf(". ", endIndex),
+        clean.lastIndexOf(";\n", endIndex),
+        clean.lastIndexOf(".\n", endIndex),
+        clean.lastIndexOf(":\n", endIndex)
+      );
+      // Prioridade 3: Quebra de linha simples (\n)
+      const lineBreak = clean.lastIndexOf("\n", endIndex);
+
+      if (paragraphBreak > startIndex + targetChunkSize * 0.6) {
+        endIndex = paragraphBreak + 2;
+      } else if (sentenceBreak > startIndex + targetChunkSize * 0.6) {
+        endIndex = sentenceBreak + 2;
+      } else if (lineBreak > startIndex + targetChunkSize * 0.6) {
+        endIndex = lineBreak + 1;
+      }
+    } else {
+      endIndex = clean.length;
+    }
+
+    const chunkContent = clean.slice(startIndex, endIndex).trim();
+    if (chunkContent.length >= 35) {
+      chunks.push({
+        id: `${file.id}_chunk_${chunkIndex}`,
+        fileId: file.id,
+        fileName: file.name,
+        webViewLink: file.webViewLink,
+        webContentLink: file.webContentLink,
+        chunkIndex,
+        totalChunks: 0, // atualizado abaixo
+        text: chunkContent,
+        charCount: chunkContent.length,
+      });
+      chunkIndex++;
+    }
+
+    if (endIndex >= clean.length) break;
+    // Garante avanço com sobreposição controlada
+    startIndex = Math.max(endIndex - overlap, startIndex + 50);
+  }
+
+  // Define totalChunks para todos os blocos do arquivo
+  for (const c of chunks) {
+    c.totalChunks = chunks.length;
+  }
+
+  return chunks;
+}
+
+// Stopwords em Português Brasileiro para filtragem de ruído textual
+const PT_STOPWORDS = new Set([
+  "a", "ao", "aos", "aquela", "aquelas", "aquele", "aqueles", "aquilo", "as", "ate", "com", "como",
+  "da", "das", "de", "dela", "delas", "dele", "deles", "depois", "do", "dos", "e", "ela", "elas",
+  "ele", "eles", "em", "entre", "era", "eram", "eramos", "essa", "essas", "esse", "esses", "esta",
+  "estas", "este", "estes", "estou", "eu", "foi", "fomos", "foram", "ha", "isso", "isto", "ja", "lhe",
+  "lhes", "mais", "mas", "me", "mesmo", "meu", "meus", "minha", "minhas", "muito", "na", "nao", "nas",
+  "nem", "no", "nos", "nossa", "nossas", "nosso", "nossos", "num", "numa", "o", "os", "ou", "para",
+  "pela", "pelas", "pelo", "pelos", "por", "qual", "quais", "quando", "que", "quem", "se", "seja",
+  "sejam", "sem", "ser", "seu", "seus", "so", "sua", "suas", "tambem", "te", "tem", "temos", "tenho",
+  "teu", "teus", "tinha", "tinham", "tu", "tua", "tuas", "um", "uma", "voce", "voces", "vos",
+  "sobre", "posso", "pode", "podem", "deve", "devem", "quanto", "quantos", "quantas", "qualquer",
+  "onde", "dizer", "fazer", "saber", "obrigado", "favor", "gostaria"
+]);
+
+// Normaliza texto para correspondência insensível a maiúsculas e acentos
+function normalizePtText(text: string): string {
+  return (text || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+// Extrai palavras-chave e tokens técnicos da consulta do usuário
+function extractKeywords(query: string): string[] {
+  const norm = normalizePtText(query);
+  const rawTokens = norm.match(/[a-z0-9_]{2,}/g) || [];
+  const validTokens = rawTokens.filter((t) => !PT_STOPWORDS.has(t) && t.length >= 2);
+  return Array.from(new Set(validTokens));
+}
+
+// Retrieval Engine: seleciona os 10 a 15 blocos mais relevantes com base nas palavras da pergunta do usuário
+function retrieveRelevantChunks(
+  query: string,
+  chunks: DocumentChunk[],
+  maxResults = 15
+): ScoredChunk[] {
+  if (!chunks || chunks.length === 0) return [];
+
+  const queryTerms = extractKeywords(query);
+  const normQuery = normalizePtText(query);
+
+  // Se a consulta não contiver termos específicos (ex: apenas envio de imagem ou pergunta genérica),
+  // seleciona uma amostragem representativa inicial dos documentos
+  if (queryTerms.length === 0) {
+    const defaultChunks: ScoredChunk[] = [];
+    const seenFiles = new Set<string>();
+    for (const chunk of chunks) {
+      if (!seenFiles.has(chunk.fileId)) {
+        seenFiles.add(chunk.fileId);
+        defaultChunks.push({ chunk, score: 1.0, matchedTerms: ["amostra_inicial"] });
+      }
+      if (defaultChunks.length >= Math.min(12, maxResults)) break;
+    }
+    for (const chunk of chunks) {
+      if (defaultChunks.length >= Math.min(10, maxResults)) break;
+      if (!defaultChunks.some((sc) => sc.chunk.id === chunk.id)) {
+        defaultChunks.push({ chunk, score: 0.5, matchedTerms: ["amostra_inicial"] });
+      }
+    }
+    return defaultChunks;
+  }
+
+  const scored: ScoredChunk[] = [];
+
+  for (const chunk of chunks) {
+    const normChunkText = normalizePtText(chunk.text);
+    const normFileName = normalizePtText(chunk.fileName);
+
+    let score = 0;
+    const matchedTerms: string[] = [];
+
+    // 1. Relevância por correspondência no título da lei/arquivo (ex: "9050", "14718", "obras")
+    for (const term of queryTerms) {
+      if (normFileName.includes(term)) {
+        score += 18.0;
+        matchedTerms.push(`arquivo:${term}`);
+      }
+    }
+
+    // 2. Frequência ponderada de termos técnicos e legais no corpo do bloco
+    let uniqueTermsInBody = 0;
+    for (const term of queryTerms) {
+      let count = 0;
+      let pos = 0;
+      while ((pos = normChunkText.indexOf(term, pos)) !== -1) {
+        count++;
+        pos += term.length;
+      }
+
+      if (count > 0) {
+        uniqueTermsInBody++;
+        matchedTerms.push(term);
+
+        const isNumeric = /^\d+$/.test(term);
+        const isNormCode = term.startsWith("nbr") || term.startsWith("nr") || isNumeric;
+        const isTechnicalKeyword = [
+          "rampa", "inclinacao", "desnivel", "corrimao", "guarda", "corpo", "afastamento",
+          "recuo", "janela", "parede", "habite", "acessibilidade", "escada", "degrau", "artigo", "item"
+        ].includes(term);
+
+        const weight = isNormCode ? 4.5 : isTechnicalKeyword ? 3.0 : 1.5;
+        score += Math.log2(1 + count) * 3.5 * weight;
+      }
+    }
+
+    // 3. Cobertura conjuntiva: bônus multiplicativo quando o bloco responde a múltiplos termos simultaneamente
+    if (queryTerms.length > 1 && uniqueTermsInBody > 1) {
+      const coverageRatio = uniqueTermsInBody / queryTerms.length;
+      score *= 1.0 + coverageRatio * 2.0;
+      score += uniqueTermsInBody * 4.0;
+    }
+
+    // 4. Bônus por frase exata
+    if (normQuery.length >= 7 && normChunkText.includes(normQuery)) {
+      score += 25.0;
+      matchedTerms.push("frase_exata");
+    }
+
+    if (score > 0) {
+      scored.push({ chunk, score, matchedTerms });
+    }
+  }
+
+  // Ordena decrescente por relevância
+  scored.sort((a, b) => b.score - a.score);
+
+  if (scored.length > 0) {
+    const topResults = scored.slice(0, Math.min(maxResults, 15));
+    // Assegura pelo menos 10 blocos selecionados caso existam outros blocos disponíveis
+    if (topResults.length < 10 && scored.length > topResults.length) {
+      for (const item of scored.slice(topResults.length)) {
+        if (topResults.length >= 10) break;
+        topResults.push(item);
+      }
+    }
+    return topResults.slice(0, 15);
+  }
+
+  // Fallback: se nenhum termo obteve match direto, seleciona os 10 primeiros blocos do acervo
+  return chunks.slice(0, Math.min(10, maxResults)).map((chunk) => ({
+    chunk,
+    score: 0.1,
+    matchedTerms: ["padrao"],
+  }));
+}
 
 // Fallback resiliente: extrai arquivos públicos de páginas do Google Drive analisando scripts e dados serializados
 async function scrapePublicDriveFolder(folderId: string): Promise<any[]> {
@@ -695,6 +945,9 @@ async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = 
   // Check cache if less than 45 seconds old (unless bypassed)
   if (!bypassCache && driveCache && driveCache.folderId === folderId && Date.now() - driveCache.timestamp < 45000) {
     console.log(`[Drive Sync] Retornando ${driveCache.files.length} arquivos do cache em memória para a pasta ${folderId}.`);
+    if (globalDriveChunks.length === 0 && driveCache.files.length > 0) {
+      globalDriveChunks = driveCache.files.flatMap((f: any) => f.chunks || []);
+    }
     return driveCache.files;
   }
 
@@ -751,12 +1004,15 @@ async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = 
     console.log(`[Drive Sync] Extração HTML finalizada: ${files.length} arquivos detectados.`);
   }
 
-  // 4. Extração de Conteúdo Real para PDFs, Google Docs e arquivos de texto
+  // 4. Extração de Conteúdo Real e Particionamento em Chunks (PDFs, Google Docs e arquivos de texto)
   for (const file of files) {
     // 4.1. Verifica cache em memória
     if (driveContentCache.has(file.id)) {
       const cached = driveContentCache.get(file.id)!;
+      file.fullText = cached.fullText;
       file.contentSnippet = cached.snippet;
+      file.chunks = cached.chunks || [];
+      file.chunksCount = file.chunks.length;
       if (cached.pageCount) file.pageCount = cached.pageCount;
       continue;
     }
@@ -794,16 +1050,22 @@ async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = 
           const parsed = await parsePdfBuffer(pdfBuffer);
           const rawText = (parsed.text || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
           if (rawText) {
-            // Guarda até 8.000 caracteres de conteúdo normativo
-            const snippet = rawText.slice(0, 8000);
+            const fullText = rawText.slice(0, 120000);
+            const snippet = rawText.slice(0, 4000);
+            const chunks = chunkDocumentText(file, fullText);
+            file.fullText = fullText;
             file.contentSnippet = snippet;
             file.pageCount = parsed.numpages;
+            file.chunks = chunks;
+            file.chunksCount = chunks.length;
             driveContentCache.set(file.id, {
+              fullText,
               snippet,
               pageCount: parsed.numpages,
               timestamp: Date.now(),
+              chunks,
             });
-            console.log(`[Drive PDF] PDF lido com sucesso: "${file.name}" (${parsed.numpages} páginas, ${snippet.length} caracteres extraídos).`);
+            console.log(`[Drive PDF RAG] PDF lido: "${file.name}" (${parsed.numpages} pág., ${chunks.length} blocos criados).`);
           }
         }
       } catch (pdfErr: any) {
@@ -828,9 +1090,15 @@ async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = 
           }
         }
         if (docText) {
-          const snippet = docText.slice(0, 8000);
+          const fullText = docText.slice(0, 120000);
+          const snippet = docText.slice(0, 4000);
+          const chunks = chunkDocumentText(file, fullText);
+          file.fullText = fullText;
           file.contentSnippet = snippet;
-          driveContentCache.set(file.id, { snippet, timestamp: Date.now() });
+          file.chunks = chunks;
+          file.chunksCount = chunks.length;
+          driveContentCache.set(file.id, { fullText, snippet, timestamp: Date.now(), chunks });
+          console.log(`[Drive Doc RAG] Documento "${file.name}" processado: ${chunks.length} blocos criados.`);
         }
       } catch (docErr: any) {
         console.warn(`[Drive Doc] Erro ao exportar documento "${file.name}":`, docErr.message);
@@ -854,15 +1122,35 @@ async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = 
           }
         }
         if (text) {
-          const snippet = text.slice(0, 8000);
+          const fullText = text.slice(0, 120000);
+          const snippet = text.slice(0, 4000);
+          const chunks = chunkDocumentText(file, fullText);
+          file.fullText = fullText;
           file.contentSnippet = snippet;
-          driveContentCache.set(file.id, { snippet, timestamp: Date.now() });
+          file.chunks = chunks;
+          file.chunksCount = chunks.length;
+          driveContentCache.set(file.id, { fullText, snippet, timestamp: Date.now(), chunks });
+          console.log(`[Drive Txt RAG] Arquivo de texto "${file.name}" processado: ${chunks.length} blocos criados.`);
         }
       } catch (txtErr: any) {
         console.warn(`[Drive Txt] Erro ao carregar arquivo de texto "${file.name}":`, txtErr.message);
       }
     }
   }
+
+  // 5. Consolidação e indexação do acervo de chunks em memória
+  const allIndexedChunks: DocumentChunk[] = [];
+  for (const file of files) {
+    if (!file.chunks || file.chunks.length === 0) {
+      const fallbackText = file.fullText || file.contentSnippet || `DOCUMENTO NORMATIVO: ${file.name}\nIdentificador: ${file.id}\nTipo: ${file.mimeType}\nLink de Consulta: ${file.webViewLink || file.webContentLink || "N/A"}\n(Documento do acervo técnico no Google Drive).`;
+      const fallbackChunks = chunkDocumentText(file, fallbackText);
+      file.chunks = fallbackChunks;
+      file.chunksCount = fallbackChunks.length;
+    }
+    allIndexedChunks.push(...(file.chunks || []));
+  }
+
+  globalDriveChunks = allIndexedChunks;
 
   // Atualiza cache em memória
   driveCache = {
@@ -871,7 +1159,7 @@ async function buscarNormasDoGoogleDrive(customFolderId?: string, bypassCache = 
     files,
   };
 
-  console.log(`[Drive Sync] Total final de normas sincronizadas para uso da IA: ${files.length}`);
+  console.log(`[Drive Sync] Total final de normas sincronizadas: ${files.length} arquivos (${globalDriveChunks.length} blocos no acervo RAG).`);
   return files;
 }
 
@@ -912,10 +1200,11 @@ app.get("/api/drive/status", checkVipAccess, async (req, res) => {
       folderId,
       files,
       count: files.length,
+      totalChunks: globalDriveChunks.length,
       lastChecked: new Date().toISOString(),
       message:
         files.length > 0
-          ? `${files.length} arquivo(s) carregado(s) da pasta do Google Drive.`
+          ? `${files.length} arquivo(s) carregado(s) da pasta do Google Drive (${globalDriveChunks.length} blocos indexados no RAG).`
           : "Pasta configurada. Se nenhum arquivo for listado, confirme se a pasta está compartilhada como 'Qualquer pessoa com o link' em modo Leitor.",
     });
   } catch (err: any) {
@@ -945,22 +1234,41 @@ const handleConsultation = async (req: express.Request, res: express.Response) =
 
     // 1. Busca os arquivos disponíveis na pasta pública/compartilhada do Google Drive
     const arquivosDrive = await buscarNormasDoGoogleDrive(driveFolderId);
+
+    // Garante que o acervo de blocos em memória esteja sincronizado
+    if (globalDriveChunks.length === 0 && arquivosDrive.length > 0) {
+      globalDriveChunks = arquivosDrive.flatMap((f: any) => f.chunks || []);
+    }
+
+    // 2. RAG Leve: Recuperação seletiva dos 10 a 15 blocos mais relevantes com base na pergunta
+    const userQuery = String(prompt || "");
+    const relevantChunks = retrieveRelevantChunks(userQuery, globalDriveChunks, 15);
+
     let driveContext = "";
-    if (arquivosDrive.length > 0) {
-      const listaFormatada = arquivosDrive
-        .map((f: any) => {
-          let item = `- [ARQUIVO GOOGLE DRIVE] Nome: "${f.name}" | ID: ${f.id} | Link: ${f.webViewLink || f.webContentLink || "N/A"}`;
-          if (f.pageCount) {
-            item += ` | Páginas: ${f.pageCount}`;
+    if (relevantChunks.length > 0) {
+      const blocosFormatados = relevantChunks
+        .map((item, idx) => {
+          const c = item.chunk;
+          let bloco = `[BLOCO NORMATIVO RELEVANTE #${idx + 1} | Relevância: ${item.score.toFixed(1)}]`;
+          bloco += `\nARQUIVO / LEI DE ORIGEM: "${c.fileName}" (Bloco ${c.chunkIndex + 1} de ${c.totalChunks})`;
+          bloco += `\nID DO ARQUIVO: ${c.fileId}`;
+          if (c.webViewLink || c.webContentLink) {
+            bloco += `\nLINK GOOGLE DRIVE: ${c.webViewLink || c.webContentLink}`;
           }
-          if (f.contentSnippet) {
-            item += `\n  CONTEÚDO NORMATIVO REAL EXTRAÍDO DO GOOGLE DRIVE:\n"""\n${f.contentSnippet.slice(0, 4000)}\n"""`;
-          }
-          return item;
+          bloco += `\nCONTEÚDO NORMATIVO LITERAL DO BLOCO:\n"""\n${c.text}\n"""`;
+          return bloco;
         })
         .join("\n\n");
 
-      driveContext = `PASTA COMPARTILHADA DO GOOGLE DRIVE (${arquivosDrive.length} documentos reais disponíveis):\n${listaFormatada}\n`;
+      driveContext = `ACERVO DE NORMAS DO GOOGLE DRIVE (RAG LEVE - BLOCOS SELECIONADOS POR RELEVÂNCIA):\n` +
+        `Total no acervo: ${arquivosDrive.length} normas (${globalDriveChunks.length} blocos indexados em memória).\n` +
+        `Foram selecionados os seguintes ${relevantChunks.length} blocos de maior relevância para responder à dúvida técnica:\n\n` +
+        blocosFormatados + "\n";
+    } else if (arquivosDrive.length > 0) {
+      const listaSimples = arquivosDrive
+        .map((f: any) => `- [ARQUIVO GOOGLE DRIVE] Nome: "${f.name}" | ID: ${f.id} | Link: ${f.webViewLink || "N/A"}`)
+        .join("\n");
+      driveContext = `PASTA COMPARTILHADA DO GOOGLE DRIVE (${arquivosDrive.length} documentos disponíveis):\n${listaSimples}\n`;
     }
 
     // 2. Diretrizes e instruções ativas configuradas pelo Administrador
