@@ -2328,26 +2328,34 @@ app.delete("/api/chats/:id", checkVipAccess, (req, res) => {
 
 // Vite middleware & static serving
 async function startServer() {
-  // Inicialização do Supabase e verificação do Administrador Mestre
-  await initSupabaseAndMasterAdmin();
+  try {
+    if (process.env.NODE_ENV !== "production") {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), "dist");
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
 
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+      console.log(`Servidor de Legislação da Construção Civil rodando em http://localhost:${PORT}`);
+
+      // Inicialização do Supabase e verificação do Administrador Mestre em background (não-bloqueante)
+      initSupabaseAndMasterAdmin().catch((err: any) => {
+        console.warn("[Supabase] Aviso na inicialização em background:", err?.message || err);
+      });
     });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+  } catch (err: any) {
+    console.error("[Server] Erro fatal na inicialização do servidor:", err);
+    process.exit(1);
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Servidor de Legislação da Construção Civil rodando em http://localhost:${PORT}`);
-  });
 }
 
 startServer();
